@@ -72,7 +72,7 @@ spec:
             - --private-ip
             - --structured-logs
             - --port=5432
-            - CLOUD_SQL_CONNECTION_NAME
+            - __CLOUD_SQL_CONNECTION_NAME__
           resources:
             requests:
               cpu: 100m
@@ -106,4 +106,3 @@ spec:
     - name: http
       port: 80
       targetPort: http
-

@@ -53,7 +53,7 @@ spec:
               mountPath: /tmp
         - name: cloud-sql-proxy
           image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.14.1
-          args: ["--auto-iam-authn", "--private-ip", "--structured-logs", "--port=5432", "CLOUD_SQL_CONNECTION_NAME"]
+          args: ["--auto-iam-authn", "--private-ip", "--structured-logs", "--port=5432", "__CLOUD_SQL_CONNECTION_NAME__"]
           resources:
             requests:
               cpu: 100m
@@ -75,4 +75,3 @@ spec:
         - name: tmp
           emptyDir:
             sizeLimit: 128Mi
-

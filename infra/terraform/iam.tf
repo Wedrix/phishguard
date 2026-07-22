@@ -129,26 +129,22 @@ resource "google_project_iam_member" "workloads" {
 }
 
 locals {
-  web_principal     = "principal://iam.googleapis.com/projects/${data.google_project.current.number}/locations/global/workloadIdentityPools/${var.project_id}.svc.id.goog/subject/ns/phishguard-demo/sa/web"
-  jobs_principal    = "principal://iam.googleapis.com/projects/${data.google_project.current.number}/locations/global/workloadIdentityPools/${var.project_id}.svc.id.goog/subject/ns/phishguard-demo/sa/jobs"
-  migrate_principal = "principal://iam.googleapis.com/projects/${data.google_project.current.number}/locations/global/workloadIdentityPools/${var.project_id}.svc.id.goog/subject/ns/phishguard-demo/sa/migrate"
   csi_secret_access = {
-    "web-hmac"            = ["app-hmac-key", local.web_principal]
-    "jobs-hmac"           = ["app-hmac-key", local.jobs_principal]
-    "jobs-web-risk"       = ["web-risk-api-key", local.jobs_principal]
-    "jobs-client-cert"    = ["mtls-client-cert", local.jobs_principal]
-    "jobs-client-key"     = ["mtls-client-key", local.jobs_principal]
-    "jobs-ca-cert"        = ["mtls-ca-cert", local.jobs_principal]
-    "migrate-db-password" = ["db-migrator-password", local.migrate_principal]
+    "web-hmac"            = ["app-hmac-key", "serviceAccount:${google_service_account.web.email}"]
+    "jobs-hmac"           = ["app-hmac-key", "serviceAccount:${google_service_account.jobs.email}"]
+    "jobs-web-risk"       = ["web-risk-api-key", "serviceAccount:${google_service_account.jobs.email}"]
+    "jobs-client-cert"    = ["mtls-client-cert", "serviceAccount:${google_service_account.jobs.email}"]
+    "jobs-client-key"     = ["mtls-client-key", "serviceAccount:${google_service_account.jobs.email}"]
+    "jobs-ca-cert"        = ["mtls-ca-cert", "serviceAccount:${google_service_account.jobs.email}"]
+    "migrate-db-password" = ["db-migrator-password", "serviceAccount:${google_service_account.migrate.email}"]
   }
 }
 
 resource "google_secret_manager_secret_iam_member" "csi" {
-  for_each   = local.csi_secret_access
-  secret_id  = data.google_secret_manager_secret.runtime[each.value[0]].id
-  role       = "roles/secretmanager.secretAccessor"
-  member     = each.value[1]
-  depends_on = [google_container_cluster.main]
+  for_each  = local.csi_secret_access
+  secret_id = data.google_secret_manager_secret.runtime[each.value[0]].id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = each.value[1]
 }
 
 resource "google_service_account_iam_member" "web_workload_identity" {
