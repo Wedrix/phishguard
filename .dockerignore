@@ -1,0 +1,15 @@
+.git
+.github
+.env
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/node_modules
+**/dist
+**/.terraform
+**/*.tfstate*
+docs
+infra
+deploy
+output
+

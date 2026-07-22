@@ -1,0 +1,15 @@
+FROM ghcr.io/astral-sh/uv:0.11.31 AS uv
+
+FROM python:3.13-slim-bookworm
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    FETCHER_PORT=8443 \
+    PATH=/app/fetcher/.venv/bin:$PATH
+WORKDIR /app/fetcher
+COPY --from=uv /uv /usr/local/bin/uv
+COPY fetcher/pyproject.toml fetcher/uv.lock ./
+COPY fetcher/src/ ./src/
+RUN uv sync --locked --no-dev --no-editable && chown -R 65532:65532 /app
+USER 65532:65532
+EXPOSE 8443
+ENTRYPOINT ["python", "-m", "phishguard_fetcher.main"]

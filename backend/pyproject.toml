@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "phishguard"
+version = "0.1.0"
+description = "Privacy-preserving phishing risk analysis modular monolith"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "alembic==1.16.4",
+  "cryptography==45.0.5",
+  "fastapi==0.116.1",
+  "google-auth==2.40.3",
+  "google-cloud-kms==3.5.1",
+  "httpx==0.28.1",
+  "idna==3.10",
+  "joblib==1.5.1",
+  "psycopg[binary]==3.2.9",
+  "pydantic-settings==2.10.1",
+  "scikit-learn==1.7.1",
+  "sqlalchemy==2.0.41",
+  "uvicorn[standard]==0.35.0",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest==8.4.1",
+  "pytest-cov==6.2.1",
+]
+
+[project.scripts]
+phishguard = "phishguard.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/phishguard"]
+
+[tool.pytest.ini_options]
+addopts = "-q --strict-markers"
+testpaths = ["tests"]
+

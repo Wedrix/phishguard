@@ -1,0 +1,2 @@
+"""PostgreSQL-backed enrichment worker."""
+

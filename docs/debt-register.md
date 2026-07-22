@@ -1,0 +1,23 @@
+# Technical-debt register
+
+Reserve 15% of each iteration for the highest-interest open item. Every TODO, FIXME, suppression, or knowingly deferred control must reference an ID here.
+
+| ID | Deliberate limit | Interest / trigger | Upgrade path | State |
+|---|---|---|---|---|
+| DEBT-001 | One replica per workload and zonal Cloud SQL | Any availability objective beyond an experimental demo | Regional HA database, disruption budgets, autoscaling, rehearsed failover | Accepted |
+| DEBT-002 | Public GKE control-plane endpoint | Institutional production approval | Private endpoint/Connect Gateway and restricted administration path | Accepted |
+| DEBT-003 | Fetcher server mTLS files copied from Secret Manager at deploy | Rotation frequency or multi-environment operation | Automated short-lived workload certificates without granting fetcher cloud identity | Accepted |
+| DEBT-004 | IPv4 egress policy | Dual-stack cluster or IPv6 requirement | Equivalent IPv6 policy and SSRF corpus | Accepted |
+| DEBT-005 | Polling and one reputation provider | Measured latency/coverage gap | SSE or second provider after governance/licensing review | Accepted |
+| DEBT-006 | Logs, metrics, and correlation IDs without tracing | Incident cannot be diagnosed from current telemetry | Add sampled OpenTelemetry traces with URL-safe attributes | Accepted |
+| DEBT-007 | One demo environment | Multiple active contributors or release promotion requirement | Separate state/projects and promotion workflow | Accepted |
+| DEBT-008 | Initial deployment is visibly `RULE_ONLY` | Approved snapshot and model pass the activation gates | Upload checksum-pinned artefact and use the documented `demo-model` overlay | Accepted |
+| DEBT-009 | Generated data/model cards deliberately leave human governance fields pending | Any model approval or runtime activation | Complete provenance, licence, adjudication, privacy, fairness, security, owner, threshold and rollback reviews with named approvers | Open |
+| DEBT-010 | Research APIs persist dataset, experiment and export records, but no worker executes experiments or produces governed exports | A researcher needs to run or download work through the application | Add one bounded jobs executor and artefact publication path with state transitions, expiry and audit | Open |
+| DEBT-011 | Account-wide retention, deletion and personal-data export were absent | Registered-user acceptance or a privacy request requires account scope | Implemented a bounded synchronous redacted JSON export, per-user retention for new scans, and audited scan-data deletion with share/session revocation; delegated Identity Platform deletion remains out of scope | Resolved 2026-07-22 |
+| DEBT-012 | Infrastructure monitoring covers availability and Cloud SQL saturation, but application-level latency, job-age, provider and decision metrics are incomplete | Deployed diagnosis or acceptance targets cannot be measured from current signals | Add URL-free Prometheus metrics and alert rules for the documented service indicators | Open |
+| DEBT-013 | The initial Alembic revision delegates schema creation to SQLAlchemy metadata and has no granular rollback | The first post-baseline schema change or application rollback rehearsal | Freeze explicit operations for the baseline and require backward-compatible expand/contract revisions | Open |
+| DEBT-014 | Evaluation uses the pinned PSL ICANN section and conservatively groups private suffixes under their ICANN registrable domain, which may exclude extra rows | Dataset loss materially harms slice coverage or an approved study requires private-tenant isolation | Include the pinned PSL private section under controlled change and record the changed split policy | Mitigated |
+| DEBT-015 | The SRS provides no numeric ECE or Brier acceptance limits, so evaluation records calibration but selects no candidate unless both limits are explicitly supplied | Model-candidate selection or activation | Approve numeric ECE/Brier gates through controlled SRS/RTM change and pass them to the governed evaluation | Open |
+
+The unexecuted live GCP deployment, Web Risk smoke test, backup restore, load test, manual accessibility review and user study are acceptance-evidence gaps tracked in the RTM, not claims of completed verification.

@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  ENVIRONMENT: production
+  GOOGLE_CLOUD_PROJECT: PROJECT_ID
+  IDENTITY_PROJECT_ID: PROJECT_ID
+  KMS_KEY_NAME: KMS_KEY_NAME
+  STATIC_DIR: /app/frontend/dist
+  COOKIE_SECURE: "true"
+  DEV_AUTH_ENABLED: "false"
+  FETCHER_URL: https://fetcher:8443
+  FETCHER_CA_FILE: /var/run/phishguard/jobs/mtls-ca-cert
+  FETCHER_CERT_FILE: /var/run/phishguard/jobs/mtls-client-cert
+  FETCHER_KEY_FILE: /var/run/phishguard/jobs/mtls-client-key
+  JOB_CONCURRENCY: "10"
+  NOTICE_VERSION: "2026-07-22"
+  DB_NAME: phishguard
+  CLOUD_SQL_CONNECTION_NAME: CLOUD_SQL_CONNECTION_NAME
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: web
+  annotations:
+    iam.gke.io/gcp-service-account: phishguard-web@PROJECT_ID.iam.gserviceaccount.com
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jobs
+  annotations:
+    iam.gke.io/gcp-service-account: phishguard-jobs@PROJECT_ID.iam.gserviceaccount.com
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: migrate
+  annotations:
+    iam.gke.io/gcp-service-account: phishguard-migrate@PROJECT_ID.iam.gserviceaccount.com
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fetcher
+automountServiceAccountToken: false

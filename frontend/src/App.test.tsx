@@ -1,0 +1,481 @@
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { App, RESULT_POLL_DEADLINE_MS, resultPollDelay } from "./App";
+import { ApiError, api, type EngineMode, type Scan, type ScanStatus } from "./api";
+
+function renderRoute(route = "/") {
+  return render(<MemoryRouter initialEntries={[route]}><App /></MemoryRouter>);
+}
+
+function scanFixture(status: ScanStatus = "COMPLETE", engineMode: EngineMode = "HYBRID"): Scan {
+  return {
+    id: "scan-real-001",
+    display_url: "https://example[.]test/[path hidden]",
+    status,
+    requested_mode: status === "PROCESSING" ? "enriched" : "local_only",
+    created_at: "2026-07-22T10:00:00Z",
+    updated_at: "2026-07-22T10:00:00Z",
+    decision: {
+      risk_band: "MEDIUM",
+      analysis_scope: status === "PROCESSING" ? "ENRICHED" : "LOCAL_ONLY",
+      completion: status === "PROCESSING" ? "PARTIAL" : "COMPLETE",
+      engine_mode: engineMode,
+      reasons: ["The URL contains a structural risk indicator."],
+      counter_evidence: [],
+      missing_evidence: [],
+      limitations: [],
+      safe_actions: ["Use a known address instead."],
+      evidence: [],
+      versions: { policy: "policy-1", ruleset: "rules-1", model: "model-1" },
+    },
+  };
+}
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+  localStorage.clear();
+  document.cookie = "phishguard_csrf=; max-age=0; path=/";
+});
+
+describe("PhishGuard scan journey", () => {
+  it("defaults to local-only and gates enrichment behind explicit consent", async () => {
+    const user = userEvent.setup();
+    renderRoute();
+
+    expect(screen.getByRole("radio", { name: /local only/i })).toBeChecked();
+    expect(screen.queryByText(/external processing notice/i)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("radio", { name: /enriched evidence/i }));
+    expect(screen.getByText(/external processing notice/i)).toBeVisible();
+    await user.type(screen.getByLabelText(/url to inspect/i), "https://verify-account.example/login");
+    await user.click(screen.getByRole("button", { name: /analyze safely/i }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent(/confirm the enrichment notice/i);
+  });
+
+  it("uses the dark evidence workspace for authorised privileged routes", async () => {
+    vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, user_id: "user-1", role: "ADMINISTRATOR" });
+    vi.spyOn(api, "getAdminHealth").mockResolvedValue({
+      database: "available",
+      jobs: { QUEUED: 2, COMPLETE: 4 },
+      checked_at: "2026-07-22T10:00:00Z",
+    });
+    const { container } = renderRoute("/admin");
+    expect(container.querySelector(".app")).toHaveAttribute("data-theme", "dark");
+    expect(await screen.findByRole("heading", { name: /control centre/i })).toBeVisible();
+    expect(await screen.findByText("available")).toBeVisible();
+    expect(screen.getByText("6", { selector: ".metric-card strong" })).toBeVisible();
+    expect(screen.queryByText(/99\.98%/)).not.toBeInTheDocument();
+  });
+
+  it("does not render privileged content for an unauthorised role", async () => {
+    vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, user_id: "user-1", role: "REGISTERED_USER" });
+    renderRoute("/admin");
+    expect(await screen.findByRole("heading", { name: /sign in required/i })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: /control centre/i })).not.toBeInTheDocument();
+  });
+
+  it("distinguishes model deployment approval from runtime activation", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, user_id: "admin-1", role: "ADMINISTRATOR" });
+    vi.spyOn(api, "getAdminHealth").mockResolvedValue({ database: "available", jobs: {}, checked_at: "2026-07-22T10:00:00Z" });
+    vi.spyOn(api, "listDecisionPolicies").mockResolvedValue([]);
+    vi.spyOn(api, "listModels").mockResolvedValue([{
+      id: "model-real-001",
+      version: "url-logistic-1.0",
+      artifact_uri: "gs://approved-models/url-logistic-1.0.joblib",
+      sha256: "b".repeat(64),
+      metrics: {},
+      approved_for_deployment: true,
+      runtime_active: false,
+    }]);
+
+    renderRoute("/admin");
+    await screen.findByRole("heading", { name: /control centre/i });
+    await user.click(screen.getByRole("tab", { name: /policies & models/i }));
+
+    expect(await screen.findByText("Approved for deployment")).toBeVisible();
+    expect(screen.getByText(/approval is not runtime activation/i)).toBeVisible();
+    expect(screen.queryByText(/^Runtime active$/i)).not.toBeInTheDocument();
+  });
+
+  it("falls back to local demo analysis without retaining a query string", async () => {
+    vi.stubEnv("VITE_DEMO_FALLBACK", "true");
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("offline")));
+    const response = await api.createScan({
+      url: "https://münich.example/login?token=secret#fragment",
+      analysis_mode: "local_only",
+      enrichment_consent: false,
+    });
+
+    expect(response.demo).toBe(true);
+    expect(response.scan.simulated).toBe(true);
+    expect(response.scan.display_url).toContain("münich.example/[path hidden]");
+    expect(response.scan.display_url).toContain("?[query hidden]");
+    expect(response.scan.ascii_display_url).toContain("xn--mnich-kva.example/[path hidden]");
+    expect(localStorage.getItem("phishguard.demo.scans")).not.toContain("secret");
+  });
+
+  it("labels simulated results persistently and never invents external provider evidence", async () => {
+    vi.stubEnv("VITE_DEMO_FALLBACK", "true");
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("offline")));
+    const response = await api.createScan({
+      url: "https://verify-account.example/login",
+      analysis_mode: "enriched",
+      enrichment_consent: true,
+    });
+
+    expect(response.scan.status).toBe("PARTIAL");
+    expect(response.scan.decision.completion).toBe("PARTIAL");
+    expect(JSON.stringify(response.scan.decision)).not.toContain("Google Web Risk Lookup");
+    expect(JSON.stringify(response.scan.decision)).not.toContain("Social-engineering match");
+
+    renderRoute(`/scan/${response.scan.id}`);
+    expect(await screen.findByText(/simulated data — not a live assessment/i)).toBeVisible();
+    expect(screen.getByText(/google web risk and the destination were not contacted/i)).toBeVisible();
+  });
+
+  it("keeps a rule-only fallback warning visible beside the result status", async () => {
+    vi.spyOn(api, "getScanUpdate").mockResolvedValue({ scan: scanFixture("COMPLETE", "RULE_ONLY") });
+
+    renderRoute("/scan/scan-real-001");
+
+    expect(await screen.findByText("Rule-only fallback")).toBeVisible();
+    expect(screen.getByText("Rule-only fallback").closest(".result-badges")).toBeTruthy();
+  });
+
+  it("honours the polling interval, pauses after refresh failure, and retries manually", async () => {
+    vi.useFakeTimers();
+    const processing = scanFixture("PROCESSING");
+    const complete = scanFixture("COMPLETE");
+    const getUpdate = vi.spyOn(api, "getScanUpdate")
+      .mockResolvedValueOnce({ scan: processing, poll_after_ms: 1_250 })
+      .mockRejectedValueOnce(new ApiError(503, "Provider unavailable", "provider_unavailable"))
+      .mockResolvedValueOnce({ scan: complete });
+
+    renderRoute("/scan/scan-real-001");
+    await act(async () => { await Promise.resolve(); });
+    expect(getUpdate).toHaveBeenCalledTimes(1);
+    expect(resultPollDelay(1_250, 1)).toBe(2_500);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_249); });
+    expect(getUpdate).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+
+    expect(screen.getByRole("alert")).toHaveTextContent(/automatic updates paused/i);
+    fireEvent.click(screen.getByRole("button", { name: /check again/i }));
+    await act(async () => { await Promise.resolve(); });
+
+    expect(getUpdate).toHaveBeenCalledTimes(3);
+    expect(screen.getByText("Complete", { selector: ".status-complete" })).toBeVisible();
+  });
+
+  it("stops automatic result polling at the two-minute processing deadline", async () => {
+    vi.useFakeTimers();
+    const getUpdate = vi.spyOn(api, "getScanUpdate").mockResolvedValue({
+      scan: scanFixture("PROCESSING"),
+      poll_after_ms: 10_000,
+    });
+
+    renderRoute("/scan/scan-real-001");
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(RESULT_POLL_DEADLINE_MS); });
+
+    expect(screen.getByRole("status")).toHaveTextContent(/has not finished within two minutes/i);
+    const callsAtDeadline = getUpdate.mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(getUpdate).toHaveBeenCalledTimes(callsAtDeadline);
+    expect(screen.getByRole("button", { name: /check again/i })).toBeVisible();
+  });
+
+  it("confirms history deletion, preserves failures, and announces success", async () => {
+    const user = userEvent.setup();
+    const scan = scanFixture();
+    vi.spyOn(api, "listScans").mockResolvedValue([scan]);
+    const deleteScan = vi.spyOn(api, "deleteScan")
+      .mockRejectedValueOnce(new ApiError(503, "Deletion is temporarily unavailable", "delete_unavailable"))
+      .mockResolvedValueOnce();
+
+    renderRoute("/history");
+    await screen.findByRole("link", { name: scan.display_url });
+    await user.click(screen.getByRole("button", { name: `Delete scan for ${scan.display_url}` }));
+
+    const dialog = screen.getByRole("dialog", { name: /delete this scan/i });
+    expect(dialog).toHaveAttribute("aria-describedby", "delete-scan-description");
+    expect(deleteScan).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: /^delete scan$/i }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/temporarily unavailable/i);
+    expect(screen.getByRole("link", { name: scan.display_url })).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: /^delete scan$/i }));
+    expect(await screen.findByRole("status")).toHaveTextContent(/scan deleted from history/i);
+    expect(deleteScan).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("link", { name: scan.display_url })).not.toBeInTheDocument();
+  });
+
+  it("updates retention and downloads the redacted account export", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, "me").mockResolvedValue({
+      authenticated: true,
+      user_id: "user-1",
+      role: "REGISTERED_USER",
+      scan_retention_days: 30,
+      scan_retention_max_days: 30,
+    });
+    const updateRetention = vi.spyOn(api, "updateAccountRetention").mockResolvedValue({
+      scan_retention_days: 7,
+      applies_to: "new_scans",
+    });
+    vi.spyOn(api, "exportAccount").mockResolvedValue({
+      schema_version: "phishguard-account-export/1",
+      generated_at: "2026-07-22T10:00:00Z",
+      user_id: "user-1",
+      scans: [scanFixture()],
+      identity_platform_identity_included: false,
+    });
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: vi.fn(() => "blob:export") });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: vi.fn() });
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+
+    renderRoute("/account");
+    await screen.findByRole("heading", { name: /privacy and account/i });
+    await user.selectOptions(screen.getByLabelText(/keep new scans for/i), "7");
+    await user.click(screen.getByRole("button", { name: /save retention/i }));
+
+    expect(updateRetention).toHaveBeenCalledWith(7);
+    expect(await screen.findByRole("status")).toHaveTextContent(/retained for 7 days/i);
+    await user.click(screen.getByRole("button", { name: /download json/i }));
+    expect(await screen.findByRole("status")).toHaveTextContent(/redacted account export was downloaded/i);
+    expect(URL.createObjectURL).toHaveBeenCalled();
+  });
+
+  it("confirms account-wide scan deletion and explains the identity boundary", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, "me").mockResolvedValue({
+      authenticated: true,
+      user_id: "user-1",
+      role: "REGISTERED_USER",
+      scan_retention_days: 30,
+      scan_retention_max_days: 30,
+    });
+    const deleteScans = vi.spyOn(api, "deleteAccountScans").mockResolvedValue({
+      status: "deleted",
+      deleted_scan_count: 2,
+      application_sessions_revoked: true,
+      identity_platform_identity_deleted: false,
+    });
+    vi.spyOn(api, "endSession").mockResolvedValue();
+
+    renderRoute("/account");
+    await screen.findByRole("heading", { name: /privacy and account/i });
+    await user.click(screen.getByRole("button", { name: /^delete all scan data$/i }));
+    const dialog = screen.getByRole("dialog", { name: /delete all scan data/i });
+    expect(dialog).toHaveTextContent(/does not delete your google identity platform identity/i);
+    await user.click(within(dialog).getByRole("button", { name: /^delete all scan data$/i }));
+
+    expect(deleteScans).toHaveBeenCalledOnce();
+    expect(await screen.findByRole("heading", { name: /sign in to phishguard/i })).toBeVisible();
+  });
+
+  it("sends CSRF and idempotency headers for account governance actions", async () => {
+    document.cookie = "phishguard_csrf=account-csrf; path=/";
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        schema_version: "phishguard-account-export/1",
+        generated_at: "2026-07-22T10:00:00Z",
+        user_id: "user-1",
+        scans: [],
+        identity_platform_identity_included: false,
+      }), { status: 200, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ scan_retention_days: 7, applies_to: "new_scans" }), { status: 200, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: "deleted", deleted_scan_count: 0, application_sessions_revoked: true, identity_platform_identity_deleted: false }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.exportAccount();
+    await api.updateAccountRetention(7);
+    await api.deleteAccountScans();
+
+    for (const [, init] of fetchMock.mock.calls as [string, RequestInit][]) {
+      expect(new Headers(init.headers).get("X-CSRF-Token")).toBe("account-csrf");
+    }
+    expect(new Headers((fetchMock.mock.calls[1][1] as RequestInit).headers).get("Idempotency-Key")).toBeTruthy();
+    expect(new Headers((fetchMock.mock.calls[2][1] as RequestInit).headers).get("Idempotency-Key")).toBeTruthy();
+  });
+
+  it("sends JSON, idempotency and CSRF headers to the scan API", async () => {
+    document.cookie = "phishguard_csrf=test-csrf; path=/";
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      scan: {
+        id: "scan-1",
+        display_url: "https://example.test/login",
+        status: "COMPLETE",
+        requested_mode: "local_only",
+        created_at: "2026-07-22T10:00:00Z",
+        updated_at: "2026-07-22T10:00:00Z",
+        decision: {},
+      },
+    }), { status: 201, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.createScan({ url: "https://example.test/login", analysis_mode: "local_only", enrichment_consent: false });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = new Headers(init.headers);
+    expect(headers.get("Content-Type")).toBe("application/json");
+    expect(headers.get("Idempotency-Key")).toBeTruthy();
+    expect(headers.get("X-CSRF-Token")).toBe("test-csrf");
+  });
+
+  it("creates and resolves an unguessable demo report without exposing the submitted query", async () => {
+    vi.stubEnv("VITE_DEMO_FALLBACK", "true");
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("offline")));
+    const created = await api.createScan({
+      url: "https://example.test/login?token=private#fragment",
+      analysis_mode: "local_only",
+      enrichment_consent: false,
+    });
+    const share = await api.createShare(created.scan.id);
+    const report = await api.getReport(share.report_id);
+
+    expect(share.report_id).toMatch(/^demo-report-/);
+    expect(report.scan.id).toBe(created.scan.id);
+    expect(JSON.stringify(report)).not.toContain("private");
+  });
+
+  it("renders analyst cases returned by the API without placeholder targets", async () => {
+    vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, user_id: "analyst-1", role: "ANALYST" });
+    vi.spyOn(api, "listReviewCases").mockResolvedValue([{
+      id: "case-real-001",
+      scan_id: "scan-real-001",
+      feedback_id: null,
+      state: "OPEN",
+      claimed_by: null,
+      updated_at: "2026-07-22T10:00:00Z",
+    }]);
+
+    renderRoute("/analyst/cases");
+
+    expect(await screen.findByText("case-real-001")).toBeVisible();
+    expect(screen.getByText("scan-real-001")).toBeVisible();
+    expect(screen.queryByText(/micr0soft/i)).not.toBeInTheDocument();
+  });
+
+  it("shows quarantined feedback content in the analyst review workspace", async () => {
+    vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, user_id: "analyst-1", role: "ANALYST" });
+    vi.spyOn(api, "getReviewCase").mockResolvedValue({
+      id: "case-real-001",
+      scan_id: "scan-real-001",
+      feedback_id: "feedback-real-001",
+      state: "OPEN",
+      claimed_by: null,
+      updated_at: "2026-07-22T10:00:00Z",
+      feedback: {
+        id: "feedback-real-001",
+        category: "FALSE_NEGATIVE",
+        comment: "The page requested an account password.",
+        status: "QUARANTINED",
+        created_at: "2026-07-22T09:55:00Z",
+      },
+      events: [],
+    });
+    vi.spyOn(api, "getScan").mockRejectedValue(new ApiError(404, "Unavailable", "not_found"));
+
+    renderRoute("/analyst/cases/case-real-001");
+
+    expect(await screen.findByRole("heading", { name: /submitted feedback/i })).toBeVisible();
+    expect(screen.getByText("The page requested an account password.")).toBeVisible();
+    expect(screen.getByText("FALSE NEGATIVE")).toBeVisible();
+    expect(screen.getByText("QUARANTINED")).toBeVisible();
+  });
+
+  it("shows real research registry records and marks unsupported execution unavailable", async () => {
+    vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, user_id: "researcher-1", role: "RESEARCHER" });
+    vi.spyOn(api, "listDatasets").mockResolvedValue([{
+      id: "dataset-real-001",
+      name: "OpenPhish temporal snapshot",
+      sha256: "a".repeat(64),
+      manifest: { source: "OpenPhish Academic" },
+      state: "APPROVED",
+      created_at: "2026-07-22T10:00:00Z",
+    }]);
+    vi.spyOn(api, "listExperiments").mockResolvedValue([]);
+    vi.spyOn(api, "listResearchExports").mockResolvedValue([]);
+
+    renderRoute("/research");
+
+    expect(await screen.findByText("OpenPhish temporal snapshot")).toBeVisible();
+    expect(screen.getByText(/creation is therefore unavailable/i)).toBeVisible();
+    expect(screen.queryByText(/PG-2026/i)).not.toBeInTheDocument();
+  });
+
+  it("sends CSRF and idempotency headers for review-case transitions", async () => {
+    document.cookie = "phishguard_csrf=review-csrf; path=/";
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      id: "case-real-001",
+      scan_id: "scan-real-001",
+      feedback_id: null,
+      state: "CLAIMED",
+      claimed_by: "analyst-1",
+      updated_at: "2026-07-22T10:00:00Z",
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.reviewCaseAction("case-real-001", { action: "claim" });
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = new Headers(init.headers);
+    expect(url).toBe("/api/v1/review-cases/case-real-001/actions");
+    expect(init.method).toBe("POST");
+    expect(init.body).toBe(JSON.stringify({ action: "claim" }));
+    expect(headers.get("Idempotency-Key")).toBeTruthy();
+    expect(headers.get("X-CSRF-Token")).toBe("review-csrf");
+  });
+
+  it("opens fresh verification before retrying a protected admin change", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, user_id: "admin-1", role: "ADMINISTRATOR" });
+    vi.spyOn(api, "getAdminHealth").mockResolvedValue({ database: "available", jobs: {}, checked_at: "2026-07-22T10:00:00Z" });
+    vi.spyOn(api, "listAdminUsers").mockResolvedValue([{
+      id: "user-real-001",
+      role: "REGISTERED_USER",
+      email_verified: true,
+      mfa_verified: false,
+      disabled: false,
+      created_at: "2026-07-22T10:00:00Z",
+    }]);
+    vi.spyOn(api, "updateAdminUser").mockRejectedValueOnce(new ApiError(403, "Authentication within the last five minutes is required", "fresh_auth_required"));
+
+    renderRoute("/admin");
+    await screen.findByRole("heading", { name: /control centre/i });
+    await user.click(screen.getByRole("tab", { name: /users/i }));
+    await screen.findByText("user-real-001");
+    await user.click(screen.getByRole("button", { name: /^save$/i }));
+
+    expect(await screen.findByRole("heading", { name: /verify it’s you/i })).toBeVisible();
+    expect(screen.getByLabelText(/identity platform password/i)).toBeVisible();
+    expect(screen.getByText(/phishguard receives only a verified id token/i)).toBeVisible();
+  });
+
+  it("sends only the verified ID token to the session reauthentication API", async () => {
+    document.cookie = "phishguard_csrf=reauth-csrf; path=/";
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ status: "reauthenticated" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.reauthenticate("verified-identity-token");
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/v1/session/reauth");
+    expect(init.body).toBe(JSON.stringify({ id_token: "verified-identity-token" }));
+    expect(init.body).not.toContain("password");
+    expect(new Headers(init.headers).get("X-CSRF-Token")).toBe("reauth-csrf");
+  });
+});

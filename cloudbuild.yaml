@@ -1,0 +1,86 @@
+substitutions:
+  _REGION: africa-south1
+  _DOMAIN: phishguard.example.com
+  _DEPLOY: "false"
+  _TAG: dev
+  _OVERLAY: demo
+  _FIREBASE_API_KEY: replace-with-restricted-web-key
+  _FIREBASE_AUTH_DOMAIN: phishguard.example.firebaseapp.com
+  _FIREBASE_PROJECT_ID: phishguard-example
+
+serviceAccount: projects/${PROJECT_ID}/serviceAccounts/phishguard-cloud-build@${PROJECT_ID}.iam.gserviceaccount.com
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
+
+steps:
+  - id: backend-tests
+    name: python:3.13-slim-bookworm
+    dir: backend
+    entrypoint: /bin/sh
+    args: ["-ec", "python -m pip install --no-cache-dir uv==0.11.31 && uv sync --locked --extra test && uv run --no-sync pytest"]
+
+  - id: fetcher-tests
+    name: python:3.13-slim-bookworm
+    dir: fetcher
+    entrypoint: /bin/sh
+    args: ["-ec", "python -m pip install --no-cache-dir uv==0.11.31 && uv sync --locked --extra dev && uv run --no-sync pytest"]
+
+  - id: frontend-tests
+    name: node:22-bookworm-slim
+    dir: frontend
+    entrypoint: /bin/sh
+    args: ["-ec", "corepack enable && corepack prepare pnpm@10.15.1 --activate && pnpm install --frozen-lockfile && pnpm test && pnpm build"]
+
+  - id: terraform-format
+    name: hashicorp/terraform:1.12
+    entrypoint: /bin/sh
+    args: ["-ec", "terraform -chdir=infra/terraform fmt -check -recursive"]
+
+  - id: terraform-validate
+    name: hashicorp/terraform:1.12
+    entrypoint: /bin/sh
+    args: ["-ec", "terraform -chdir=infra/terraform init -backend=false -input=false && terraform -chdir=infra/terraform validate"]
+
+  - id: kustomize-render
+    name: gcr.io/cloud-builders/kubectl
+    entrypoint: /bin/sh
+    args: ["-ec", "kubectl kustomize deploy/k8s/overlays/demo >/dev/null && kubectl kustomize deploy/k8s/overlays/demo-model >/dev/null"]
+
+  - id: build-app
+    name: gcr.io/cloud-builders/docker
+    args: ["build", "-f", "Dockerfile.app", "--build-arg", "VITE_FIREBASE_API_KEY=${_FIREBASE_API_KEY}", "--build-arg", "VITE_FIREBASE_AUTH_DOMAIN=${_FIREBASE_AUTH_DOMAIN}", "--build-arg", "VITE_FIREBASE_PROJECT_ID=${_FIREBASE_PROJECT_ID}", "-t", "${_REGION}-docker.pkg.dev/${PROJECT_ID}/phishguard/app:${_TAG}", "."]
+
+  - id: build-fetcher
+    name: gcr.io/cloud-builders/docker
+    args: ["build", "-f", "Dockerfile.fetcher", "-t", "${_REGION}-docker.pkg.dev/${PROJECT_ID}/phishguard/fetcher:${_TAG}", "."]
+
+  - id: push-app
+    name: gcr.io/cloud-builders/docker
+    args: ["push", "${_REGION}-docker.pkg.dev/${PROJECT_ID}/phishguard/app:${_TAG}"]
+
+  - id: push-fetcher
+    name: gcr.io/cloud-builders/docker
+    args: ["push", "${_REGION}-docker.pkg.dev/${PROJECT_ID}/phishguard/fetcher:${_TAG}"]
+
+  - id: deploy
+    name: gcr.io/cloud-builders/gcloud
+    entrypoint: /bin/bash
+    args:
+      - -ec
+      - |
+        if [[ "${_DEPLOY}" != "true" ]]; then exit 0; fi
+        connection_name=$(gcloud sql instances describe phishguard-demo --project "${PROJECT_ID}" --format='value(connectionName)')
+        app_digest=$(gcloud artifacts docker images describe "${_REGION}-docker.pkg.dev/${PROJECT_ID}/phishguard/app:${_TAG}" --format='value(image_summary.digest)')
+        fetcher_digest=$(gcloud artifacts docker images describe "${_REGION}-docker.pkg.dev/${PROJECT_ID}/phishguard/fetcher:${_TAG}" --format='value(image_summary.digest)')
+        PROJECT_ID="${PROJECT_ID}" \
+        REGION="${_REGION}" \
+        DOMAIN="${_DOMAIN}" \
+        APP_IMAGE="${_REGION}-docker.pkg.dev/${PROJECT_ID}/phishguard/app@$${app_digest}" \
+        FETCHER_IMAGE="${_REGION}-docker.pkg.dev/${PROJECT_ID}/phishguard/fetcher@$${fetcher_digest}" \
+        CLOUD_SQL_CONNECTION_NAME="$${connection_name}" \
+        KUSTOMIZE_OVERLAY="${_OVERLAY}" \
+        ./deploy/scripts/deploy.sh
+
+timeout: 3600s

@@ -1,0 +1,323 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migrate
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: migrate
+    spec:
+      restartPolicy: Never
+      serviceAccountName: migrate
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: cloud-sql-proxy
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.14.1
+          restartPolicy: Always
+          args: ["--private-ip", "--structured-logs", "--port=5432", "CLOUD_SQL_CONNECTION_NAME"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+      containers:
+        - name: migrate
+          image: APP_IMAGE
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              export DATABASE_URL="$(python -c 'import os, pathlib, urllib.parse; password = pathlib.Path("/var/run/phishguard/migrate/db-migrator-password").read_text().strip(); print("postgresql+psycopg://" + urllib.parse.quote(os.environ["DB_MIGRATOR_USER"], safe="") + ":" + urllib.parse.quote(password, safe="") + "@127.0.0.1:5432/" + os.environ["DB_NAME"])')"
+              export PSYCOPG_DATABASE_URL="postgresql://${DATABASE_URL#postgresql+psycopg://}"
+              python -c '
+              import os
+              import psycopg
+              with psycopg.connect(os.environ["PSYCOPG_DATABASE_URL"]) as connection:
+                  with connection.cursor() as cursor:
+                      cursor.execute("GRANT ALL ON SCHEMA public TO cloudsqlsuperuser")
+              '
+              python -m phishguard.cli migrate
+              python -c '
+              import os
+              import psycopg
+              from psycopg import sql
+              roles = [
+                  os.environ["WEB_DB_IAM_USER"],
+                  os.environ["JOBS_DB_IAM_USER"],
+              ]
+              statements = [
+                  "GRANT USAGE ON SCHEMA public TO {}",
+                  "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {}",
+                  "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {}",
+                  "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {}",
+                  "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO {}",
+                  "REVOKE UPDATE, DELETE ON TABLE audit_event, evidence_observation, decision, review_case_event FROM {}",
+              ]
+              with psycopg.connect(os.environ["PSYCOPG_DATABASE_URL"]) as connection:
+                  with connection.cursor() as cursor:
+                      cursor.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC")
+                      for role_name in roles:
+                          role = sql.Identifier(role_name)
+                          cursor.execute(
+                              sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(
+                                  sql.Identifier(os.environ["DB_NAME"]), role
+                              )
+                          )
+                          for statement in statements:
+                              cursor.execute(sql.SQL(statement).format(role))
+              '
+          envFrom:
+            - configMapRef:
+                name: app-config
+          env:
+            - name: DB_MIGRATOR_USER
+              value: phishguard_migrator
+            - name: WEB_DB_IAM_USER
+              value: phishguard-web@PROJECT_ID.iam
+            - name: JOBS_DB_IAM_USER
+              value: phishguard-jobs@PROJECT_ID.iam
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+          volumeMounts:
+            - name: migrate-secrets
+              mountPath: /var/run/phishguard/migrate
+              readOnly: true
+      volumes:
+        - name: migrate-secrets
+          csi:
+            driver: secrets-store-gke.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: migrate-secrets
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cleanup
+spec:
+  schedule: "17 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: cleanup
+        spec:
+          restartPolicy: Never
+          serviceAccountName: jobs
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          initContainers:
+            - name: cloud-sql-proxy
+              image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.14.1
+              restartPolicy: Always
+              args: ["--auto-iam-authn", "--private-ip", "--structured-logs", "--port=5432", "CLOUD_SQL_CONNECTION_NAME"]
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  memory: 256Mi
+          containers:
+            - name: cleanup
+              image: APP_IMAGE
+              command: ["/bin/sh", "-ec"]
+              args:
+                - |
+                  export PHISHGUARD_HMAC_KEY="$(cat /var/run/phishguard/jobs/app-hmac-key)"
+                  export DATABASE_URL="$(python -c 'import os, urllib.parse; print("postgresql+psycopg://" + urllib.parse.quote(os.environ["DB_IAM_USER"], safe="") + "@127.0.0.1:5432/" + os.environ["DB_NAME"])')"
+                  exec python -m phishguard.cli cleanup
+              envFrom:
+                - configMapRef:
+                    name: app-config
+              env:
+                - name: DB_IAM_USER
+                  value: phishguard-jobs@PROJECT_ID.iam
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 250m
+                  memory: 512Mi
+                limits:
+                  memory: 1Gi
+              volumeMounts:
+                - name: jobs-secrets
+                  mountPath: /var/run/phishguard/jobs
+                  readOnly: true
+          volumes:
+            - name: jobs-secrets
+              csi:
+                driver: secrets-store-gke.csi.k8s.io
+                readOnly: true
+                volumeAttributes:
+                  secretProviderClass: jobs-secrets
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: audit-anchor
+spec:
+  schedule: "11 0 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: audit-anchor
+        spec:
+          restartPolicy: Never
+          serviceAccountName: jobs
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          initContainers:
+            - name: cloud-sql-proxy
+              image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.14.1
+              restartPolicy: Always
+              args: ["--auto-iam-authn", "--private-ip", "--structured-logs", "--port=5432", "CLOUD_SQL_CONNECTION_NAME"]
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  memory: 256Mi
+          containers:
+            - name: audit-anchor
+              image: APP_IMAGE
+              command: ["/bin/sh", "-ec"]
+              args:
+                - |
+                  export PHISHGUARD_HMAC_KEY="$(cat /var/run/phishguard/jobs/app-hmac-key)"
+                  export DATABASE_URL="$(python -c 'import os, urllib.parse; print("postgresql+psycopg://" + urllib.parse.quote(os.environ["DB_IAM_USER"], safe="") + "@127.0.0.1:5432/" + os.environ["DB_NAME"])')"
+                  exec python -m phishguard.cli anchor-audit
+              envFrom:
+                - configMapRef:
+                    name: app-config
+              env:
+                - name: DB_IAM_USER
+                  value: phishguard-jobs@PROJECT_ID.iam
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  memory: 512Mi
+              volumeMounts:
+                - name: jobs-secrets
+                  mountPath: /var/run/phishguard/jobs
+                  readOnly: true
+          volumes:
+            - name: jobs-secrets
+              csi:
+                driver: secrets-store-gke.csi.k8s.io
+                readOnly: true
+                volumeAttributes:
+                  secretProviderClass: jobs-secrets
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: evaluate
+spec:
+  schedule: "0 0 1 1 *"
+  suspend: true
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: evaluate
+          annotations:
+            gke-gcsfuse/volumes: "true"
+        spec:
+          restartPolicy: Never
+          serviceAccountName: jobs
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: evaluate
+              image: APP_IMAGE
+              envFrom:
+                - configMapRef:
+                    name: app-config
+              command: ["/bin/sh", "-ec"]
+              args:
+                - |
+                  output="/artifacts/research/outputs/evaluation-$(date -u +%Y%m%dT%H%M%SZ)"
+                  exec python -m phishguard.cli evaluate /artifacts/research/input.csv "$output"
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 1
+                  memory: 2Gi
+                limits:
+                  memory: 4Gi
+              volumeMounts:
+                - name: artifacts
+                  mountPath: /artifacts
+          volumes:
+            - name: artifacts
+              csi:
+                driver: gcsfuse.csi.storage.gke.io
+                readOnly: false
+                volumeAttributes:
+                  bucketName: RESEARCH_BUCKET
+                  mountOptions: implicit-dirs

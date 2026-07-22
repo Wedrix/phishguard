@@ -1,0 +1,34 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../demo
+patches:
+  - target:
+      kind: Deployment
+      name: web|jobs
+    patch: |-
+      - op: add
+        path: /spec/template/metadata/annotations
+        value:
+          gke-gcsfuse/volumes: "true"
+      - op: add
+        path: /spec/template/spec/volumes/-
+        value:
+          name: models
+          csi:
+            driver: gcsfuse.csi.storage.gke.io
+            readOnly: true
+            volumeAttributes:
+              bucketName: MODEL_BUCKET
+              mountOptions: implicit-dirs
+      - op: add
+        path: /spec/template/spec/containers/0/envFrom/-
+        value:
+          secretRef:
+            name: active-model
+      - op: add
+        path: /spec/template/spec/containers/0/volumeMounts/-
+        value:
+          name: models
+          mountPath: /models
+          readOnly: true
