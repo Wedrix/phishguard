@@ -144,28 +144,32 @@ locals {
 }
 
 resource "google_secret_manager_secret_iam_member" "csi" {
-  for_each  = local.csi_secret_access
-  secret_id = data.google_secret_manager_secret.runtime[each.value[0]].id
-  role      = "roles/secretmanager.secretAccessor"
-  member    = each.value[1]
+  for_each   = local.csi_secret_access
+  secret_id  = data.google_secret_manager_secret.runtime[each.value[0]].id
+  role       = "roles/secretmanager.secretAccessor"
+  member     = each.value[1]
+  depends_on = [google_container_cluster.main]
 }
 
 resource "google_service_account_iam_member" "web_workload_identity" {
   service_account_id = google_service_account.web.name
   role               = "roles/iam.workloadIdentityUser"
   member             = "serviceAccount:${var.project_id}.svc.id.goog[phishguard-demo/web]"
+  depends_on         = [google_container_cluster.main]
 }
 
 resource "google_service_account_iam_member" "jobs_workload_identity" {
   service_account_id = google_service_account.jobs.name
   role               = "roles/iam.workloadIdentityUser"
   member             = "serviceAccount:${var.project_id}.svc.id.goog[phishguard-demo/jobs]"
+  depends_on         = [google_container_cluster.main]
 }
 
 resource "google_service_account_iam_member" "migrate_workload_identity" {
   service_account_id = google_service_account.migrate.name
   role               = "roles/iam.workloadIdentityUser"
   member             = "serviceAccount:${var.project_id}.svc.id.goog[phishguard-demo/migrate]"
+  depends_on         = [google_container_cluster.main]
 }
 
 resource "google_kms_crypto_key_iam_member" "web" {
