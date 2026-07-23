@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, field_validator
 
 class SessionRequest(BaseModel):
     id_token: str = Field(min_length=20, max_length=8192)
+    requested_role: Literal["REGISTERED_USER", "ANALYST", "RESEARCHER"] | None = None
 
 
 class ScanRequest(BaseModel):
@@ -26,6 +27,15 @@ class ShareRequest(BaseModel):
 
 class RetentionUpdateRequest(BaseModel):
     days: int = Field(ge=1, le=365)
+
+
+class RoleRequestCreateRequest(BaseModel):
+    requested_role: Literal["ANALYST", "RESEARCHER"]
+
+
+class RoleRequestActionRequest(BaseModel):
+    action: Literal["APPROVE", "REJECT"]
+    note: str | None = Field(default=None, max_length=1000)
 
 
 class ReviewActionRequest(BaseModel):
@@ -81,5 +91,5 @@ class ExportCreateRequest(BaseModel):
 
 
 class UserUpdateRequest(BaseModel):
-    role: Literal["REGISTERED_USER", "ANALYST", "RESEARCHER"]
+    role: Literal["REGISTERED_USER", "ANALYST", "ADMINISTRATOR", "RESEARCHER"]
     disabled: bool = False

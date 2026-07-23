@@ -1,5 +1,5 @@
 import type { MultiFactorResolver, TotpSecret } from "firebase/auth";
-import { api } from "./api";
+import { api, type RequestedRole } from "./api";
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -8,6 +8,7 @@ const firebaseConfig = {
 };
 
 let pendingResolver: MultiFactorResolver | null = null;
+let pendingRequestedRole: RequestedRole | undefined;
 let pendingReauthResolver: MultiFactorResolver | null = null;
 let pendingSecret: TotpSecret | null = null;
 
@@ -33,23 +34,28 @@ async function configuredAuth() {
   return getAuth(app);
 }
 
-async function exchangeCredential(user: { getIdToken(forceRefresh?: boolean): Promise<string> }) {
-  await api.exchangeSession(await user.getIdToken(true));
+async function exchangeCredential(
+  user: { getIdToken(forceRefresh?: boolean): Promise<string> },
+  requestedRole?: RequestedRole,
+) {
+  return api.exchangeSession(await user.getIdToken(true), requestedRole);
 }
 
-export async function beginPasswordSignIn(email: string, password: string) {
+export async function beginPasswordSignIn(email: string, password: string, requestedRole?: RequestedRole) {
   const auth = await configuredAuth();
   const { getMultiFactorResolver, signInWithEmailAndPassword, TotpMultiFactorGenerator } = await import("firebase/auth");
   try {
     const credential = await signInWithEmailAndPassword(auth, email, password);
-    await exchangeCredential(credential.user);
-    return { mfaRequired: false, factorName: "" };
+    const session = await exchangeCredential(credential.user, requestedRole);
+    pendingRequestedRole = undefined;
+    return { mfaRequired: false as const, factorName: "", session };
   } catch (error) {
     if (firebaseCode(error) === "auth/multi-factor-auth-required") {
       pendingResolver = getMultiFactorResolver(auth, error as Parameters<typeof getMultiFactorResolver>[1]);
+      pendingRequestedRole = requestedRole;
       const hint = pendingResolver.hints.find((item) => item.factorId === TotpMultiFactorGenerator.FACTOR_ID);
       if (!hint) throw new IdentityError("This account requires an unsupported second factor.", "unsupported_mfa");
-      return { mfaRequired: true, factorName: hint.displayName || "Authenticator app" };
+      return { mfaRequired: true as const, factorName: hint.displayName || "Authenticator app" };
     }
     throw friendlyIdentityError(error);
   }
@@ -63,8 +69,10 @@ export async function completeTotpSignIn(code: string) {
   try {
     const assertion = TotpMultiFactorGenerator.assertionForSignIn(hint.uid, code);
     const credential = await pendingResolver.resolveSignIn(assertion);
+    const session = await exchangeCredential(credential.user, pendingRequestedRole);
     pendingResolver = null;
-    await exchangeCredential(credential.user);
+    pendingRequestedRole = undefined;
+    return session;
   } catch (error) {
     throw friendlyIdentityError(error);
   }
