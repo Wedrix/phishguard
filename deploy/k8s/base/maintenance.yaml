@@ -297,8 +297,10 @@ spec:
               command: ["/bin/sh", "-ec"]
               args:
                 - |
-                  output="/artifacts/research/outputs/evaluation-$(date -u +%Y%m%dT%H%M%SZ)"
-                  exec python -m phishguard.cli evaluate /artifacts/research/input.csv "$output"
+                  export PHISHGUARD_HMAC_KEY="$(cat /var/run/phishguard/jobs/app-hmac-key)"
+                  export DATABASE_URL="$(python -c 'import os, urllib.parse; print("postgresql+psycopg://" + urllib.parse.quote(os.environ["DB_IAM_USER"], safe="") + "@127.0.0.1:5432/" + os.environ["DB_NAME"])')"
+                  python -m phishguard.cli evaluate-record --next --artifact-root /artifacts/research
+                  exec python -m phishguard.cli export-record --next --artifact-root /artifacts/research
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true
@@ -310,9 +312,31 @@ spec:
                   memory: 2Gi
                 limits:
                   memory: 4Gi
+              env:
+                - name: DB_IAM_USER
+                  value: phishguard-jobs@__PROJECT_ID__.iam
               volumeMounts:
                 - name: artifacts
                   mountPath: /artifacts
+                - name: jobs-secrets
+                  mountPath: /var/run/phishguard/jobs
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+            - name: cloud-sql-proxy
+              image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.14.1
+              args: ["--auto-iam-authn", "--private-ip", "--structured-logs", "--port=5432", "__CLOUD_SQL_CONNECTION_NAME__"]
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  memory: 256Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
           volumes:
             - name: artifacts
               csi:
@@ -321,3 +345,12 @@ spec:
                 volumeAttributes:
                   bucketName: RESEARCH_BUCKET
                   mountOptions: implicit-dirs
+            - name: jobs-secrets
+              csi:
+                driver: secrets-store-gke.csi.k8s.io
+                readOnly: true
+                volumeAttributes:
+                  secretProviderClass: jobs-secrets
+            - name: tmp
+              emptyDir:
+                sizeLimit: 256Mi

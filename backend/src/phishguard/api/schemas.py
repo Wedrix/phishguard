@@ -19,6 +19,7 @@ class ScanRequest(BaseModel):
 class FeedbackRequest(BaseModel):
     category: Literal["FALSE_POSITIVE", "FALSE_NEGATIVE", "UNCLEAR", "OTHER"]
     comment: str | None = Field(default=None, max_length=1000)
+    research_consent: bool = False
 
 
 class ShareRequest(BaseModel):
@@ -42,6 +43,7 @@ class ReviewActionRequest(BaseModel):
     action: Literal["claim", "release", "annotate", "adjudicate"]
     note: str | None = Field(default=None, max_length=2000)
     outcome: Literal["MALICIOUS", "BENIGN", "INCONCLUSIVE"] | None = None
+    evidence_ids: list[str] = Field(default_factory=list, max_length=32)
 
     @field_validator("outcome")
     @classmethod

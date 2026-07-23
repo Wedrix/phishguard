@@ -25,7 +25,7 @@ def append_audit(
         # Serialise the chain head without depending on a row that does not yet
         # exist. The transaction-scoped lock is released automatically.
         db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": 0x504849534847})
-    head = select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(1)
+    head = select(AuditEvent).order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc()).limit(1)
     # The PostgreSQL advisory lock already serialises writers. FOR UPDATE would
     # require UPDATE privilege on this append-only table and break least-privilege
     # runtime roles, which intentionally have only SELECT and INSERT.
@@ -61,3 +61,27 @@ def append_audit(
     db.add(event)
     db.flush()
     return event
+
+
+def verify_audit_chain(rows: list[AuditEvent], key: bytes) -> tuple[bool, str | None]:
+    previous_hmac: str | None = None
+    for row in rows:
+        body = json.dumps(
+            {
+                "actor": row.actor_user_id,
+                "action": row.action,
+                "object_type": row.object_type,
+                "object_id": row.object_id,
+                "outcome": row.outcome,
+                "correlation_id": row.correlation_id,
+                "detail": row.detail,
+                "previous": previous_hmac,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        expected = hmac.new(key, body.encode(), hashlib.sha256).hexdigest()
+        if row.previous_hmac != previous_hmac or not hmac.compare_digest(row.event_hmac, expected):
+            return False, row.id
+        previous_hmac = row.event_hmac
+    return True, None

@@ -18,7 +18,8 @@ export interface EvidenceObservation {
   family: string;
   label: string;
   state: EvidenceState;
-  value: string;
+  value: Record<string, unknown> | null;
+  value_redacted?: boolean;
   source: string;
   observed_at?: string;
   retrieved_at?: string;
@@ -127,6 +128,13 @@ export interface AccountExport {
   identity_platform_identity_included: false;
 }
 
+export interface FeedbackReceipt {
+  id: string;
+  status: string;
+  review_case_id: string;
+  research_consent: boolean;
+}
+
 export interface ReviewCase {
   id: string;
   scan_id: string;
@@ -139,7 +147,7 @@ export interface ReviewCase {
 export interface ReviewCaseEvent {
   id: string;
   action: string;
-  detail: { note?: string | null; outcome?: string | null };
+  detail: { note?: string | null; outcome?: string | null; evidence_ids?: string[] };
   created_at: string;
 }
 
@@ -149,6 +157,7 @@ export interface ReviewCaseDetail extends ReviewCase {
     category: string;
     comment: string | null;
     status: string;
+    research_consent: boolean;
     created_at: string;
   };
   events: ReviewCaseEvent[];
@@ -157,7 +166,7 @@ export interface ReviewCaseDetail extends ReviewCase {
 export type ReviewAction =
   | { action: "claim" | "release" }
   | { action: "annotate"; note: string }
-  | { action: "adjudicate"; note?: string; outcome: "MALICIOUS" | "BENIGN" | "INCONCLUSIVE" };
+  | { action: "adjudicate"; note: string; outcome: "MALICIOUS" | "BENIGN" | "INCONCLUSIVE"; evidence_ids: string[] };
 
 export interface AdminUser {
   id: string;
@@ -205,12 +214,19 @@ export interface AuditEvent {
   object_id: string | null;
   outcome: string;
   correlation_id: string;
+  previous_hmac?: string | null;
+  event_hmac?: string;
   created_at: string;
 }
 
 export interface AdminHealth {
   database: string;
   jobs: Record<string, number>;
+  active_user_sessions?: number;
+  decisions_7d?: number;
+  outcomes_7d?: Record<string, number>;
+  model_versions_7d?: Record<string, number>;
+  provider_telemetry?: Record<string, { observations_7d: number; states: Record<string, number>; last_retrieved_at: string | null }>;
   canonical_admin?: { status: "CONFIGURED" | "MISSING"; count: 0 | 1 };
   checked_at: string;
 }
@@ -326,7 +342,7 @@ function demoDecision(raw: string, scope: AnalysisScope): Decision {
       family: "URL",
       label: "Transport scheme",
       state: "OBSERVED",
-      value: url.protocol === "https:" ? "HTTPS present" : "Plain HTTP",
+      value: { protocol: url.protocol.replace(":", "") },
       source: "Simulated local URL parser",
       observed_at: now,
       version: "url-policy/1.0",
@@ -336,7 +352,7 @@ function demoDecision(raw: string, scope: AnalysisScope): Decision {
       family: "URL",
       label: "Suspicious URL terms",
       state: hits.length ? "OBSERVED" : "NO_MATCH",
-      value: hits.length ? hits.join(", ") : "No high-risk terms found",
+      value: { matches: hits },
       source: "Simulated deterministic rules",
       observed_at: now,
       version: "ruleset/1.0",
@@ -349,7 +365,7 @@ function demoDecision(raw: string, scope: AnalysisScope): Decision {
           family: "REPUTATION",
           label: "External reputation",
           state: "UNAVAILABLE",
-          value: "Not contacted in simulated demo mode",
+          value: {},
           source: "Simulated demo policy",
           version: "demo/1.0",
           reason_code: "simulated_not_contacted",
@@ -359,7 +375,7 @@ function demoDecision(raw: string, scope: AnalysisScope): Decision {
           family: "TLS",
           label: "TLS certificate",
           state: "UNAVAILABLE",
-          value: "Not retrieved in simulated demo mode",
+          value: {},
           source: "Simulated demo policy",
           version: "demo/1.0",
           reason_code: "simulated_not_contacted",
@@ -371,7 +387,7 @@ function demoDecision(raw: string, scope: AnalysisScope): Decision {
           family: "REPUTATION",
           label: "External reputation",
           state: "SKIPPED_POLICY",
-          value: "Not requested in local-only mode",
+          value: {},
           source: "Enrichment policy",
           version: "policy/1.0",
           reason_code: "local_only",
@@ -519,6 +535,10 @@ export const api = {
     return request(`/review-cases/${encodeURIComponent(id)}`);
   },
 
+  async revealReviewCaseUrl(id: string): Promise<{ url: string }> {
+    return request(`/review-cases/${encodeURIComponent(id)}/original-url`);
+  },
+
   async reviewCaseAction(id: string, action: ReviewAction): Promise<ReviewCase> {
     return request(`/review-cases/${encodeURIComponent(id)}/actions`, {
       method: "POST",
@@ -536,6 +556,13 @@ export const api = {
       method: "PUT",
       headers: { "Idempotency-Key": crypto.randomUUID() },
       body: JSON.stringify({ role, disabled }),
+    });
+  },
+
+  async revokeUserSessions(id: string): Promise<{ user_id: string; revoked_session_count: number }> {
+    return request(`/admin/users/${encodeURIComponent(id)}/revoke-sessions`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
     });
   },
 
@@ -568,6 +595,21 @@ export const api = {
     return (await request<{ items: DecisionPolicy[] }>("/admin/decision-policies")).items;
   },
 
+  async createDecisionPolicy(version: string, config: Record<string, unknown>): Promise<DecisionPolicy> {
+    return request("/admin/decision-policies", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({ version, config }),
+    });
+  },
+
+  async activateDecisionPolicy(id: string): Promise<DecisionPolicy & { deployment_required: true; previous_policy_id: string | null }> {
+    return request(`/admin/decision-policies/${encodeURIComponent(id)}/activate`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+    });
+  },
+
   async listModels(): Promise<ModelRelease[]> {
     return (await request<{ items: ModelRelease[] }>("/admin/models")).items;
   },
@@ -579,8 +621,21 @@ export const api = {
     });
   },
 
-  async listAuditEvents(): Promise<AuditEvent[]> {
-    return (await request<{ items: AuditEvent[] }>("/admin/audit-events")).items;
+  async registerModel(version: string, artifactUri: string, sha256: string, metrics: Record<string, unknown>): Promise<ModelRelease> {
+    return request("/admin/models", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({ version, artifact_uri: artifactUri, sha256, metrics }),
+    });
+  },
+
+  async listAuditEvents(query = ""): Promise<AuditEvent[]> {
+    const suffix = query.trim() ? `?${new URLSearchParams({ q: query.trim() })}` : "";
+    return (await request<{ items: AuditEvent[] }>(`/admin/audit-events${suffix}`)).items;
+  },
+
+  async verifyAuditEvents(): Promise<{ valid: boolean; checked_events: number; failed_event_id: string | null; head_hmac: string | null; verified_at: string }> {
+    return request("/admin/audit-events/verify");
   },
 
   async getAdminHealth(): Promise<AdminHealth> {
@@ -591,12 +646,36 @@ export const api = {
     return (await request<{ items: DatasetSnapshot[] }>("/research/datasets")).items;
   },
 
+  async createDataset(name: string, sha256: string, manifest: Record<string, unknown>): Promise<DatasetSnapshot> {
+    return request("/research/datasets", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({ name, sha256, manifest }),
+    });
+  },
+
   async listExperiments(): Promise<Experiment[]> {
     return (await request<{ items: Experiment[] }>("/research/experiments")).items;
   },
 
+  async createExperiment(datasetId: string, config: Record<string, unknown>): Promise<Experiment> {
+    return request("/research/experiments", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({ dataset_id: datasetId, config }),
+    });
+  },
+
   async listResearchExports(): Promise<ResearchExport[]> {
     return (await request<{ items: ResearchExport[] }>("/research/exports")).items;
+  },
+
+  async createResearchExport(filters: Record<string, unknown>): Promise<ResearchExport> {
+    return request("/research/exports", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({ filters }),
+    });
   },
 
   async createScan(payload: CreateScanRequest): Promise<CreateScanResponse> {
@@ -624,6 +703,10 @@ export const api = {
     return (await api.getScanUpdate(id)).scan;
   },
 
+  async revealOriginalUrl(id: string): Promise<{ url: string }> {
+    return request(`/scans/${encodeURIComponent(id)}/original-url`);
+  },
+
   async listScans(): Promise<Scan[]> {
     try {
       const response = await request<{ items: Scan[] }>("/scans");
@@ -642,13 +725,13 @@ export const api = {
     await request<void>(`/scans/${encodeURIComponent(id)}`, { method: "DELETE" });
   },
 
-  async submitFeedback(scanId: string, verdict: string, comment: string): Promise<void> {
-    if (scanId.startsWith("demo-")) return;
+  async submitFeedback(scanId: string, verdict: string, comment: string, researchConsent: boolean): Promise<FeedbackReceipt> {
+    if (scanId.startsWith("demo-")) return { id: `demo-feedback-${crypto.randomUUID()}`, status: "QUARANTINED", review_case_id: "simulated", research_consent: researchConsent };
     const category = verdict === "should_be_high" ? "FALSE_NEGATIVE" : verdict === "should_be_low" ? "FALSE_POSITIVE" : "OTHER";
-    await request(`/scans/${encodeURIComponent(scanId)}/feedback`, {
+    return request(`/scans/${encodeURIComponent(scanId)}/feedback`, {
       method: "POST",
       headers: { "Idempotency-Key": crypto.randomUUID() },
-      body: JSON.stringify({ category, comment }),
+      body: JSON.stringify({ category, comment, research_consent: researchConsent }),
     });
   },
 

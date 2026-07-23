@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sys
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from sqlalchemy import select
@@ -11,7 +14,18 @@ from phishguard import cli
 from phishguard.application.audit import append_audit
 from phishguard.config import Settings
 from phishguard.infrastructure.database import create_schema, make_engine, make_session_factory
-from phishguard.infrastructure.models import ApplicationSession, AuditEvent, UserAccount
+from phishguard.infrastructure.models import (
+    AnalysisRun,
+    ApplicationSession,
+    AuditEvent,
+    DatasetSnapshot,
+    Decision,
+    Experiment,
+    Feedback,
+    ResearchExport,
+    Scan,
+    UserAccount,
+)
 
 
 def _database() -> tuple[Settings, object, object]:
@@ -216,3 +230,153 @@ def test_transfer_canonical_admin_requires_explicit_confirmation(monkeypatch) ->
                 "replacement-subject",
             ],
         )
+
+
+def test_recorded_evaluation_verifies_snapshot_and_persists_measured_result(
+    monkeypatch, tmp_path: Path
+) -> None:
+    settings, engine, factory = _database()
+    dataset_path = tmp_path / "frozen.csv"
+    dataset_path.write_text("url,label\nhttps://example.test,0\n", encoding="utf-8")
+    digest = hashlib.sha256(dataset_path.read_bytes()).hexdigest()
+    with factory.begin() as db:
+        researcher = _user("researcher-subject", "RESEARCHER")
+        db.add(researcher)
+        db.flush()
+        dataset = DatasetSnapshot(
+            name="Frozen snapshot",
+            manifest={"artifact_path": dataset_path.name},
+            sha256=digest,
+            created_by=researcher.id,
+        )
+        db.add(dataset)
+        db.flush()
+        experiment = Experiment(
+            dataset_id=dataset.id,
+            config={
+                "max_expected_calibration_error": 0.1,
+                "max_brier_score": 0.1,
+            },
+            created_by=researcher.id,
+        )
+        db.add(experiment)
+        db.flush()
+        experiment_id = experiment.id
+
+    observed: dict[str, object] = {}
+
+    def evaluate(path, output, **gates):
+        observed.update(path=path, output=output, gates=gates)
+        return {"schema_version": "evaluation/1", "selected_model": "logistic_regression"}
+
+    monkeypatch.setattr(cli, "evaluate_dataset", evaluate)
+    _run(
+        monkeypatch,
+        settings,
+        engine,
+        ["evaluate-record", "--next", "--artifact-root", str(tmp_path)],
+    )
+
+    assert observed["path"] == dataset_path
+    assert observed["gates"] == {
+        "max_expected_calibration_error": 0.1,
+        "max_brier_score": 0.1,
+    }
+    with factory() as db:
+        completed = db.get(Experiment, experiment_id)
+        assert completed is not None
+        assert completed.state == "COMPLETE"
+        assert completed.result["selected_model"] == "logistic_regression"
+        assert completed.result["output_path"] == f"outputs/{experiment_id}"
+
+
+def test_recorded_export_includes_only_consented_adjudicated_redacted_rows(
+    monkeypatch, tmp_path: Path
+) -> None:
+    settings, engine, factory = _database()
+    with factory.begin() as db:
+        researcher = _user("export-researcher", "RESEARCHER")
+        db.add(researcher)
+        db.flush()
+        run = AnalysisRun(
+            fingerprint="a" * 64,
+            policy_context="policy-1",
+            normalized_ciphertext="encrypted-normalized-url",
+        )
+        db.add(run)
+        db.flush()
+        scan = Scan(
+            run_id=run.id,
+            owner_user_id=researcher.id,
+            original_ciphertext="encrypted-original-url",
+            display_url="https://example[.]test/[path hidden]",
+            requested_mode="LOCAL_ONLY",
+            enrichment_consent=False,
+            expires_at=datetime.now(UTC) + timedelta(days=1),
+        )
+        db.add(scan)
+        db.flush()
+        db.add(
+            Decision(
+                run_id=run.id,
+                stage="LOCAL",
+                risk_band="MEDIUM",
+                analysis_scope="LOCAL_ONLY",
+                completion="COMPLETE",
+                engine_mode="RULE_ONLY",
+                probability=0.6,
+                policy_version="policy-1",
+                ruleset_version="rules-1",
+                fusion_version="fusion-1",
+            )
+        )
+        db.add_all(
+            [
+                Feedback(
+                    scan_id=scan.id,
+                    author_user_id=researcher.id,
+                    category="FALSE_NEGATIVE",
+                    comment="This comment must never be exported.",
+                    research_consent=True,
+                    status="REVIEWED_MALICIOUS",
+                ),
+                Feedback(
+                    scan_id=scan.id,
+                    author_user_id=researcher.id,
+                    category="OTHER",
+                    comment="No research consent.",
+                    research_consent=False,
+                    status="REVIEWED_BENIGN",
+                ),
+            ]
+        )
+        export = ResearchExport(
+            filters={"purpose": "acceptance"},
+            created_by=researcher.id,
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+        db.add(export)
+        db.flush()
+        export_id = export.id
+
+    _run(
+        monkeypatch,
+        settings,
+        engine,
+        ["export-record", "--next", "--artifact-root", str(tmp_path)],
+    )
+
+    output = tmp_path / "exports" / f"{export_id}.json"
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["row_count"] == 1
+    assert payload["rows"][0]["redacted_url"] == "https://example[.]test/[path hidden]"
+    serialized = output.read_text(encoding="utf-8")
+    assert "This comment must never be exported." not in serialized
+    assert "No research consent." not in serialized
+    assert "encrypted-original-url" not in serialized
+    assert "export-researcher" not in serialized
+    with factory() as db:
+        completed = db.get(ResearchExport, export_id)
+        assert completed is not None
+        assert completed.state == "COMPLETE"
+        assert completed.artifact_uri == f"research/exports/{export_id}.json"

@@ -70,16 +70,15 @@ The privileged-governance migration and its audit/request rows remain in place. 
 
 To reverse a completed canonical transfer, first have the new canonical Administrator re-enable and reappoint the former account as an active, assured non-canonical Administrator, then run a new, separately approved `transfer-canonical-admin` operation with the current and replacement subjects reversed. This is a new audited change, not deletion of the earlier event. If the replacement cannot authenticate, transfer to a prequalified recovery candidate. If no qualified candidate exists, declare an access-control incident and restore through the approved database recovery process; do not bypass constraints or rewrite the audit chain. The absence of an independent break-glass path is recorded as technical debt.
 
-For a governed evaluation, place the approved CSV at `gs://PROJECT_ID-phishguard-research/research/input.csv`. Set the paired ECE and Brier limits approved in the SRS/RTM and create the one-off job:
+For a governed evaluation, place the approved CSV at `gs://PROJECT_ID-phishguard-research/research/input.csv` and calculate its SHA-256 digest. In the Research workspace, register a frozen dataset snapshot whose manifest includes `"artifact_path": "input.csv"`, then create an experiment against that snapshot. Put any approved ECE and Brier limits in the experiment configuration as `max_expected_calibration_error` and `max_brier_score`; both values are optional, but they must be supplied together.
+
+The evaluator resolves the relative path below the governed `research/` mount, verifies the frozen digest, atomically claims one queued experiment, runs the existing reproducible evaluation pipeline, and records only measured output. Trigger the suspended job with:
 
 ```sh
-kubectl -n phishguard-demo patch configmap app-config --type merge \
-  -p "{\"data\":{\"EVALUATION_MAX_ECE\":\"$APPROVED_MAX_ECE\",\"EVALUATION_MAX_BRIER\":\"$APPROVED_MAX_BRIER\"}}"
-kubectl -n phishguard-demo create job --from=cronjob/evaluate \
-  "evaluate-$(date -u +%Y%m%d%H%M%S)"
+make evaluate-next
 ```
 
-Both values are optional, but they must be supplied together. Do not invent limits when they are absent: the evaluator will record metrics but select no candidate. Remove the two ConfigMap keys after the governed run if they should not apply to subsequent jobs. The report directory is written under `research/outputs/`; record its object generation and hashes in the experiment manifest.
+The same job processes at most one queued privacy-filtered research export after the experiment step. Exports include only scans with explicit research consent and independent adjudication; comments, identities and decrypted URLs are excluded. Evaluation reports are written below `research/outputs/<experiment-id>/` and exports below `research/exports/`. Do not invent missing limits: without approved calibration gates, the evaluator records metrics but selects no candidate. Record object generations and hashes in the acceptance evidence.
 
 ## Monitoring completion
 

@@ -87,7 +87,7 @@ describe("PhishGuard scan journey", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(/confirm the enrichment notice/i);
   });
 
-  it("uses the dark evidence workspace for authorised privileged routes", async () => {
+  it("does not force a route theme and leaves colour selection to the device", async () => {
     vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, session_kind: "USER", user_id: "user-1", role: "ADMINISTRATOR" });
     vi.spyOn(api, "getAdminHealth").mockResolvedValue({
       database: "available",
@@ -95,7 +95,7 @@ describe("PhishGuard scan journey", () => {
       checked_at: "2026-07-22T10:00:00Z",
     });
     const { container } = renderRoute("/admin");
-    expect(container.querySelector(".app")).toHaveAttribute("data-theme", "dark");
+    expect(container.querySelector(".app")).not.toHaveAttribute("data-theme");
     expect(await screen.findByRole("heading", { name: /control centre/i })).toBeVisible();
     expect(await screen.findByText("available")).toBeVisible();
     expect(screen.getByText("6", { selector: ".metric-card strong" })).toBeVisible();
@@ -117,6 +117,7 @@ describe("PhishGuard scan journey", () => {
 
     renderRoute();
     expect(await screen.findByRole("link", { name: /^sign in$/i })).toBeVisible();
+    expect(screen.getByRole("link", { name: /^privacy$/i })).toBeVisible();
     expect(screen.queryByRole("link", { name: /^history$/i })).not.toBeInTheDocument();
     cleanup();
 
@@ -130,6 +131,26 @@ describe("PhishGuard scan journey", () => {
     expect(screen.getByRole("link", { name: /open workspace/i })).toHaveAttribute("href", "/analyst/cases");
     expect(screen.getByRole("button", { name: /^sign out$/i })).toBeVisible();
     expect(me).toHaveBeenCalledTimes(3);
+  });
+
+  it("provides a dedicated privacy page to anonymous, guest, and signed-in users", async () => {
+    vi.spyOn(api, "me").mockResolvedValue({ authenticated: false, session_kind: "GUEST", user_id: null, role: null });
+    renderRoute("/privacy");
+
+    expect(await screen.findByRole("heading", { name: /you choose what leaves your browser session/i })).toBeVisible();
+    expect(screen.getByRole("heading", { name: /local-only is the default/i })).toBeVisible();
+    expect(screen.getByText(/guest scans expire after one hour/i)).toBeVisible();
+    expect(screen.getByRole("link", { name: /review guest history/i })).toHaveAttribute("href", "/history");
+  });
+
+  it("explains the analysis pipeline on a dedicated public route", async () => {
+    vi.spyOn(api, "me").mockResolvedValue({ authenticated: false, session_kind: "ANONYMOUS", user_id: null, role: null });
+    renderRoute("/how-it-works");
+
+    expect(await screen.findByRole("heading", { name: /evidence first. verdict second/i })).toBeVisible();
+    expect(screen.getByRole("heading", { name: /^local-only$/i })).toBeVisible();
+    expect(screen.getByRole("heading", { name: /^enriched$/i })).toBeVisible();
+    expect(screen.getByText(/unavailable evidence never becomes a safe signal/i)).toBeVisible();
   });
 
   it("preserves a validated internal destination when authentication is required", async () => {
@@ -213,7 +234,7 @@ describe("PhishGuard scan journey", () => {
     ]);
     renderRoute("/admin");
 
-    expect(await screen.findByText("Configured", { selector: ".metric-card strong" })).toBeVisible();
+    expect(await screen.findByText(/canonical administrator: configured/i)).toBeVisible();
     await user.click(screen.getByRole("button", { name: /^users$/i }));
     expect(await screen.findByText(/immutable in application ui/i)).toBeVisible();
     expect(screen.queryByLabelText("Role for admin-1")).not.toBeInTheDocument();
@@ -287,6 +308,38 @@ describe("PhishGuard scan journey", () => {
     expect(verdictPresentation("MEDIUM").title).toBe("Use caution with this link.");
     expect(verdictPresentation("LOW").title).toBe("No strong phishing indicators found.");
     expect(verdictPresentation("INCONCLUSIVE").title).toBe("Treat this link as unverified.");
+  });
+
+  it("renders structured evidence as readable cards without treating availability as safety", async () => {
+    const scan = scanFixture();
+    scan.decision.evidence = [{
+      id: "dns-1",
+      family: "DNS",
+      label: "Dns",
+      state: "OBSERVED",
+      value: { addresses: ["23.92.20.184"] },
+      source: "isolated_fetcher:recursive-dns",
+      version: "fetcher-0.1.0",
+      observed_at: "2026-07-23T04:02:00Z",
+    }, {
+      id: "reputation-1",
+      family: "REPUTATION",
+      label: "Reputation",
+      state: "NO_MATCH",
+      value: {},
+      source: "google_web_risk",
+      version: "v1",
+    }];
+    vi.spyOn(api, "getScanUpdate").mockResolvedValue({ scan });
+    renderRoute("/scan/scan-real-001");
+
+    fireEvent.click(await screen.findByText("Evidence"));
+    expect(screen.getByRole("heading", { name: "DNS" })).toBeVisible();
+    expect(screen.getByText(/1 public address resolved: 23\.92\.20\.184/i)).toBeVisible();
+    expect(screen.getByText("Available")).toBeVisible();
+    expect(screen.getByText("No match")).toBeVisible();
+    expect(screen.getByText(/neutral evidence, not proof of safety/i)).toBeVisible();
+    expect(screen.getByText(/isolated fetcher · recursive dns/i)).toBeVisible();
   });
 
   it("makes provisional, partial, and empty-evidence states explicit", async () => {
@@ -598,7 +651,7 @@ describe("PhishGuard scan journey", () => {
   it("prevents duplicate feedback submission and surfaces API failure", async () => {
     const user = userEvent.setup();
     let rejectSubmission: (reason: unknown) => void = () => undefined;
-    vi.spyOn(api, "submitFeedback").mockImplementation(() => new Promise<void>((_resolve, reject) => { rejectSubmission = reject; }));
+    vi.spyOn(api, "submitFeedback").mockImplementation(() => new Promise<never>((_resolve, reject) => { rejectSubmission = reject; }));
     renderRoute("/feedback/scan-real-001");
 
     await user.click(screen.getByRole("radio", { name: /more dangerous/i }));
@@ -641,6 +694,7 @@ describe("PhishGuard scan journey", () => {
         category: "FALSE_NEGATIVE",
         comment: "The page requested an account password.",
         status: "QUARANTINED",
+        research_consent: false,
         created_at: "2026-07-22T09:55:00Z",
       },
       events: [],
@@ -655,7 +709,7 @@ describe("PhishGuard scan journey", () => {
     expect(screen.getByText("QUARANTINED")).toBeVisible();
   });
 
-  it("shows real research registry records and marks unsupported execution unavailable", async () => {
+  it("shows real research registry records and governed creation controls", async () => {
     vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, session_kind: "USER", user_id: "researcher-1", role: "RESEARCHER" });
     vi.spyOn(api, "listDatasets").mockResolvedValue([{
       id: "dataset-real-001",
@@ -671,7 +725,7 @@ describe("PhishGuard scan journey", () => {
     renderRoute("/research");
 
     expect(await screen.findByText("OpenPhish temporal snapshot")).toBeVisible();
-    expect(screen.getByText(/creation is therefore unavailable/i)).toBeVisible();
+    expect(screen.getByRole("heading", { name: /register a dataset snapshot/i })).toBeVisible();
     expect(screen.queryByText(/PG-2026/i)).not.toBeInTheDocument();
   });
 

@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from phishguard.api.dependencies import csrf_guard, get_db, idempotency_key, require_principal
@@ -21,7 +21,7 @@ from phishguard.api.schemas import (
     ReviewActionRequest,
     UserUpdateRequest,
 )
-from phishguard.application.audit import append_audit
+from phishguard.application.audit import append_audit, verify_audit_chain
 from phishguard.application.auth import Principal, require_fresh_auth, require_role
 from phishguard.application.roles import (
     ROLE_REQUEST_STATES,
@@ -29,12 +29,15 @@ from phishguard.application.roles import (
     RoleRequestService,
     role_request_payload,
 )
-from phishguard.application.scans import scan_is_active
+from phishguard.application.scans import ScanService, scan_is_active
 from phishguard.domain.types import Role
 from phishguard.infrastructure.models import (
+    ApplicationSession,
     AuditEvent,
     DatasetSnapshot,
+    Decision,
     DecisionPolicy,
+    EvidenceObservation,
     Experiment,
     Feedback,
     IdempotencyRecord,
@@ -121,6 +124,31 @@ def get_review_case(
     return {**_case(row, feedback), "events": [_case_event(event) for event in events]}
 
 
+@router.get("/review-cases/{case_id}/original-url")
+def reveal_review_case_original_url(
+    case_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_principal),
+) -> dict[str, str]:
+    _role(principal, Role.ANALYST, Role.ADMINISTRATOR)
+    _fresh(db, principal)
+    row = db.get(ReviewCase, case_id)
+    scan = db.get(Scan, row.scan_id) if row else None
+    if not row or not scan_is_active(scan):
+        raise ApiError(404, "not_found", "Review case was not found")
+    if row.claimed_by != principal.user_id:
+        raise ApiError(409, "case_claim_required", "Claim this case before revealing the original URL")
+    _audit(request, db, principal, "review.original_url.reveal", "review_case", row.id)
+    service = ScanService(
+        db,
+        request.app.state.settings,
+        request.app.state.cipher,
+        request.app.state.model,
+    )
+    return {"url": service.reveal(scan)}
+
+
 @router.post("/review-cases/{case_id}/actions")
 def review_action(
     case_id: str,
@@ -152,10 +180,37 @@ def review_action(
         if not body.note:
             raise ApiError(422, "note_required", "An annotation note is required")
     elif body.action == "adjudicate":
-        if row.claimed_by not in {None, principal.user_id} and principal.role != Role.ADMINISTRATOR:
-            raise ApiError(409, "not_claimant", "Only the claimant may adjudicate this case")
+        if row.claimed_by != principal.user_id:
+            raise ApiError(409, "case_claim_required", "Claim this case before adjudicating it")
         if not body.outcome:
             raise ApiError(422, "outcome_required", "An adjudication outcome is required")
+        if not body.note or len(body.note.strip()) < 20:
+            raise ApiError(422, "rationale_required", "A rationale of at least 20 characters is required")
+        cited_ids = set(body.evidence_ids)
+        if not cited_ids:
+            raise ApiError(422, "evidence_citation_required", "Cite at least one evidence observation")
+        reason_ids = {item for item in cited_ids if item.startswith("reason:")}
+        observation_ids = cited_ids - reason_ids
+        decision = db.scalar(
+            select(Decision)
+            .where(Decision.run_id == scan.run_id)
+            .order_by(Decision.created_at.desc())
+        )
+        valid_reason_ids = {
+            f"reason:{index}" for index in range(len(decision.reasons if decision else []))
+        }
+        if not reason_ids.issubset(valid_reason_ids):
+            raise ApiError(422, "invalid_evidence_reference", "A cited reason does not belong to this case")
+        available_citations = db.scalar(
+            select(func.count())
+            .select_from(EvidenceObservation)
+            .where(
+                EvidenceObservation.run_id == scan.run_id,
+                EvidenceObservation.id.in_(observation_ids),
+            )
+        ) or 0
+        if available_citations != len(observation_ids):
+            raise ApiError(422, "invalid_evidence_reference", "A cited observation does not belong to this case")
         row.state = "ADJUDICATED"
         if row.feedback_id:
             feedback = db.get(Feedback, row.feedback_id)
@@ -166,7 +221,7 @@ def review_action(
         case_id=row.id,
         actor_user_id=principal.user_id,
         action=body.action.upper(),
-        detail={"note": body.note, "outcome": body.outcome},
+        detail={"note": body.note, "outcome": body.outcome, "evidence_ids": body.evidence_ids},
     )
     db.add(event)
     db.flush()
@@ -303,6 +358,43 @@ def update_user(
     return payload
 
 
+@router.post("/admin/users/{user_id}/revoke-sessions")
+def revoke_user_sessions(
+    user_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(csrf_guard),
+    key: str = Depends(idempotency_key),
+) -> dict[str, Any]:
+    _role(principal, Role.ADMINISTRATOR)
+    _fresh(db, principal)
+    operation = f"admin:user:{user_id}:revoke_sessions"
+    if replay := _replay(db, principal.key, operation, key):
+        return replay.response
+    actor = db.get(UserAccount, principal.user_id)
+    row = db.scalar(select(UserAccount).where(UserAccount.id == user_id).with_for_update())
+    if not actor or not row:
+        raise ApiError(404, "not_found", "User was not found")
+    if row.is_canonical_admin:
+        raise ApiError(409, "canonical_admin_protected", "The canonical administrator is protected")
+    if row.role == Role.ADMINISTRATOR.value and not actor.is_canonical_admin:
+        raise ApiError(403, "canonical_admin_required", "Only the canonical administrator may revoke another administrator")
+    changed_at = datetime.now(UTC)
+    result = db.execute(
+        update(ApplicationSession)
+        .where(
+            ApplicationSession.user_id == user_id,
+            ApplicationSession.revoked_at.is_(None),
+        )
+        .values(revoked_at=changed_at)
+    )
+    count = result.rowcount or 0
+    payload = {"user_id": user_id, "revoked_session_count": count}
+    _audit(request, db, principal, "user.sessions.revoke", "user_account", user_id, {"count": count})
+    _remember(db, principal.key, operation, key, 200, payload)
+    return payload
+
+
 @router.get("/admin/role-requests")
 def admin_role_requests(
     state: str | None = "PENDING",
@@ -430,6 +522,43 @@ def create_policy(
     return payload
 
 
+@router.post("/admin/decision-policies/{policy_id}/activate")
+def activate_policy(
+    policy_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(csrf_guard),
+    key: str = Depends(idempotency_key),
+) -> dict[str, Any]:
+    _role(principal, Role.ADMINISTRATOR)
+    _fresh(db, principal)
+    operation = f"admin:policy:approve:{policy_id}"
+    if replay := _replay(db, principal.key, operation, key):
+        return replay.response
+    row = db.scalar(select(DecisionPolicy).where(DecisionPolicy.id == policy_id).with_for_update())
+    if not row:
+        raise ApiError(404, "not_found", "Decision policy was not found")
+    previous = db.scalar(select(DecisionPolicy).where(DecisionPolicy.active.is_(True)))
+    db.execute(update(DecisionPolicy).values(active=False))
+    row.active = True
+    payload = {
+        **_policy(row),
+        "deployment_required": True,
+        "previous_policy_id": previous.id if previous and previous.id != row.id else None,
+    }
+    _audit(
+        request,
+        db,
+        principal,
+        "policy.approve_for_deployment",
+        "decision_policy",
+        row.id,
+        {"previous_policy_id": payload["previous_policy_id"]},
+    )
+    _remember(db, principal.key, operation, key, 200, payload)
+    return payload
+
+
 @router.get("/admin/models")
 def admin_models(db: Session = Depends(get_db), principal: Principal = Depends(require_principal)) -> dict[str, Any]:
     _role(principal, Role.ADMINISTRATOR)
@@ -475,15 +604,35 @@ def activate_model(
     row = db.get(ModelRelease, model_id)
     if not row:
         raise ApiError(404, "not_found", "Model was not found")
+    required_gates = ("data", "feature", "evaluation", "security")
+    gates = row.metrics.get("gates") if isinstance(row.metrics, dict) else None
+    failed_gates = [gate for gate in required_gates if not isinstance(gates, dict) or gates.get(gate) is not True]
+    if failed_gates:
+        raise ApiError(
+            409,
+            "model_gates_failed",
+            "All model governance gates must pass before deployment approval",
+            {"failed_gates": failed_gates},
+        )
     # Registry approval is deliberately distinct from runtime activation. The
     # checksum-pinned demo-model overlay performs the controlled rollout.
+    previous = db.scalar(select(ModelRelease).where(ModelRelease.active.is_(True)))
     db.execute(update(ModelRelease).values(active=False))
     row.active = True
-    _audit(request, db, principal, "model.approve_for_deployment", "model_release", row.id)
+    _audit(
+        request,
+        db,
+        principal,
+        "model.approve_for_deployment",
+        "model_release",
+        row.id,
+        {"previous_model_id": previous.id if previous and previous.id != row.id else None},
+    )
     payload = {
         **_model(row),
         "runtime_active": False,
         "deployment_required": True,
+        "previous_model_id": previous.id if previous and previous.id != row.id else None,
         "next_step": "Deploy the checksum-pinned demo-model overlay and verify the rollout.",
     }
     _remember(db, principal.key, operation, key, 200, payload)
@@ -491,9 +640,27 @@ def activate_model(
 
 
 @router.get("/admin/audit-events")
-def audit_events(db: Session = Depends(get_db), principal: Principal = Depends(require_principal)) -> dict[str, Any]:
+def audit_events(
+    q: str | None = None,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_principal),
+) -> dict[str, Any]:
     _role(principal, Role.ADMINISTRATOR)
-    rows = db.scalars(select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(200))
+    if q and len(q) > 100:
+        raise ApiError(422, "search_too_long", "Audit search is limited to 100 characters")
+    statement = select(AuditEvent)
+    if q:
+        term = f"%{q.strip()}%"
+        statement = statement.where(
+            or_(
+                AuditEvent.action.ilike(term),
+                AuditEvent.object_type.ilike(term),
+                AuditEvent.object_id.ilike(term),
+                AuditEvent.correlation_id.ilike(term),
+                AuditEvent.outcome.ilike(term),
+            )
+        )
+    rows = db.scalars(statement.order_by(AuditEvent.created_at.desc()).limit(200))
     return {
         "items": [
             {
@@ -503,10 +670,33 @@ def audit_events(db: Session = Depends(get_db), principal: Principal = Depends(r
                 "object_id": row.object_id,
                 "outcome": row.outcome,
                 "correlation_id": row.correlation_id,
+                "previous_hmac": row.previous_hmac,
+                "event_hmac": row.event_hmac,
                 "created_at": row.created_at.isoformat(),
             }
             for row in rows
         ]
+    }
+
+
+@router.get("/admin/audit-events/verify")
+def verify_audit_events(
+    request: Request,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_principal),
+) -> dict[str, Any]:
+    _role(principal, Role.ADMINISTRATOR)
+    rows = list(db.scalars(select(AuditEvent).order_by(AuditEvent.created_at, AuditEvent.id)))
+    valid, failed_event_id = verify_audit_chain(
+        rows,
+        request.app.state.settings.phishguard_hmac_key.encode(),
+    )
+    return {
+        "valid": valid,
+        "checked_events": len(rows),
+        "failed_event_id": failed_event_id,
+        "head_hmac": rows[-1].event_hmac if rows else None,
+        "verified_at": datetime.now(UTC).isoformat(),
     }
 
 
@@ -519,9 +709,61 @@ def admin_health(db: Session = Depends(get_db), principal: Principal = Depends(r
         .select_from(UserAccount)
         .where(UserAccount.is_canonical_admin.is_(True))
     ) or 0
+    since = datetime.now(UTC) - timedelta(days=7)
+    decisions = list(
+        db.scalars(
+            select(Decision)
+            .where(Decision.created_at >= since)
+            .order_by(Decision.created_at.desc())
+            .limit(5000)
+        )
+    )
+    latest_decisions: dict[str, Decision] = {}
+    for decision in decisions:
+        latest_decisions.setdefault(decision.run_id, decision)
+    outcomes: dict[str, int] = {}
+    models: dict[str, int] = {}
+    for decision in latest_decisions.values():
+        outcomes[decision.risk_band] = outcomes.get(decision.risk_band, 0) + 1
+        model = decision.model_version or "rule-only"
+        models[model] = models.get(model, 0) + 1
+    provider_rows = list(
+        db.scalars(
+            select(EvidenceObservation)
+            .where(
+                EvidenceObservation.source == "google_web_risk",
+                EvidenceObservation.retrieved_at >= since,
+            )
+            .order_by(EvidenceObservation.retrieved_at.desc())
+            .limit(5000)
+        )
+    )
+    provider_states: dict[str, int] = {}
+    for observation in provider_rows:
+        provider_states[observation.state] = provider_states.get(observation.state, 0) + 1
+    active_sessions = db.scalar(
+        select(func.count())
+        .select_from(ApplicationSession)
+        .where(
+            ApplicationSession.user_id.is_not(None),
+            ApplicationSession.revoked_at.is_(None),
+            ApplicationSession.expires_at > datetime.now(UTC),
+        )
+    ) or 0
     return {
         "database": "available",
         "jobs": queue,
+        "active_user_sessions": active_sessions,
+        "decisions_7d": len(latest_decisions),
+        "outcomes_7d": outcomes,
+        "model_versions_7d": models,
+        "provider_telemetry": {
+            "google_web_risk": {
+                "observations_7d": len(provider_rows),
+                "states": provider_states,
+                "last_retrieved_at": provider_rows[0].retrieved_at.isoformat() if provider_rows else None,
+            }
+        },
         "canonical_admin": {
             "status": "CONFIGURED" if canonical_count == 1 else "MISSING",
             "count": canonical_count,
@@ -638,6 +880,7 @@ def _case(row: ReviewCase, feedback: Feedback | None = None) -> dict[str, Any]:
             "category": feedback.category,
             "comment": feedback.comment,
             "status": feedback.status,
+            "research_consent": feedback.research_consent,
             "created_at": feedback.created_at.isoformat(),
         }
     return payload
