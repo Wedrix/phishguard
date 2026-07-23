@@ -4,6 +4,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App, RESULT_POLL_DEADLINE_MS, resultPollDelay, verdictPresentation } from "./App";
 import { ApiError, api, type EngineMode, type RoleRequest, type Scan, type ScanStatus } from "./api";
+import * as identity from "./identity";
 
 function renderRoute(route = "/") {
   return render(<MemoryRouter initialEntries={[route]}><App /></MemoryRouter>);
@@ -58,6 +59,19 @@ afterEach(() => {
 });
 
 describe("PhishGuard scan journey", () => {
+  it("renders the TOTP enrollment URI as a scannable QR code", async () => {
+    vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, session_kind: "USER", user_id: "user-1", role: "REGISTERED_USER" });
+    vi.spyOn(identity, "identityConfigured").mockReturnValue(true);
+    vi.spyOn(identity, "beginTotpEnrollment").mockResolvedValue({ secretKey: "ABCDEFGHIJKLMNOP", qrCodeUrl: "otpauth://totp/PhishGuard:test?secret=ABCDEFGHIJKLMNOP" });
+    const user = userEvent.setup();
+    renderRoute("/totp");
+
+    await user.click(await screen.findByRole("button", { name: /generate setup key/i }));
+
+    expect(await screen.findByRole("img", { name: /scan this qr code/i })).toBeVisible();
+    expect(screen.getByText("ABCD EFGH IJKL MNOP")).toBeVisible();
+  });
+
   it("defaults to local-only and gates enrichment behind explicit consent", async () => {
     const user = userEvent.setup();
     renderRoute();

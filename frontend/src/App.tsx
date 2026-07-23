@@ -36,6 +36,7 @@ import {
   type Icon,
 } from "@phosphor-icons/react";
 import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
+import { QRCodeSVG } from "qrcode.react";
 import {
   Link,
   Navigate,
@@ -881,6 +882,7 @@ function SignInPage() {
 function TotpPage() {
   const configured = identityConfigured();
   const [secret, setSecret] = useState("");
+  const [qrCodeUrl, setQrCodeUrl] = useState("");
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -892,6 +894,7 @@ function TotpPage() {
     try {
       const enrollment = await beginTotpEnrollment();
       setSecret(enrollment.secretKey);
+      setQrCodeUrl(enrollment.qrCodeUrl);
     } catch (reason) {
       setError(reason instanceof IdentityError ? reason.message : "Two-step verification setup could not begin.");
     } finally {
@@ -907,6 +910,7 @@ function TotpPage() {
       await completeTotpEnrollment(code);
       setVerified(true);
       setSecret("");
+      setQrCodeUrl("");
     } catch (reason) {
       setError(reason instanceof IdentityError || reason instanceof ApiError ? reason.message : "The verification code could not be accepted.");
     } finally {
@@ -920,7 +924,7 @@ function TotpPage() {
       <div className="card setup-card">
         <ol className="setup-steps"><li className="done"><span><Check aria-hidden /></span>Install an authenticator app</li><li className="active"><span>2</span>Add your PhishGuard account</li><li><span>3</span>Verify a code</li></ol>
         <div className="setup-content">
-          <div className="key-panel"><Key aria-hidden /><p>{secret ? "Enter this one-time setup key in your authenticator app:" : "Generate a fresh setup key after signing in and verifying your email address."}</p>{secret && <code>{secret.match(/.{1,4}/g)?.join(" ")}</code>}<button type="button" className="button button-secondary" disabled={busy || !configured} onClick={secret ? () => navigator.clipboard?.writeText(secret) : generateSecret}>{secret ? <><Copy aria-hidden /> Copy key</> : <><Key aria-hidden /> Generate setup key</>}</button></div>
+          <div className="key-panel"><Key aria-hidden /><p>{secret ? "Scan this QR code with your authenticator app, or enter the setup key manually:" : "Generate a fresh setup key after signing in and verifying your email address."}</p>{qrCodeUrl && <div className="totp-qr" role="img" aria-label="Scan this QR code with your authenticator app"><QRCodeSVG value={qrCodeUrl} size={192} level="M" title="PhishGuard authenticator setup QR code" /></div>}{secret && <code>{secret.match(/.{1,4}/g)?.join(" ")}</code>}<button type="button" className="button button-secondary" disabled={busy || !configured} onClick={secret ? () => navigator.clipboard?.writeText(secret) : generateSecret}>{secret ? <><Copy aria-hidden /> Copy key</> : <><Key aria-hidden /> Generate setup key</>}</button></div>
           <form onSubmit={verify}><label className="field"><span>6-digit verification code</span><input className="code-input" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} autoComplete="one-time-code" required placeholder="000000" value={code} disabled={!secret || verified} onChange={(event) => setCode(event.target.value.replace(/\D/g, ""))} /></label><button className="button button-primary button-large" disabled={!secret || busy || verified}>{busy ? "Please wait…" : "Verify and enable"}</button>{!configured && <div className="alert alert-warning" role="status"><Info aria-hidden />Identity Platform is not configured for this build.</div>}{error && <div className="alert alert-danger" role="alert"><WarningCircle aria-hidden />{error}</div>}{verified && <div className="alert alert-success" role="status"><CheckCircle aria-hidden />Two-step verification is enabled.</div>}</form>
         </div>
       </div>

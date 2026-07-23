@@ -369,6 +369,8 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 .key-panel { padding: 18px; border-radius: 12px; background: var(--bg); border: 1px solid var(--line); text-align: center; }
 .key-panel > svg { width: 28px; height: 28px; color: var(--accent-text); }
 .key-panel p { color: var(--ink-2); font-size: 12.5px; }
+.totp-qr { display: flex; justify-content: center; margin: 12px 0; }
+.totp-qr svg { width: min(192px, 100%); height: auto; padding: 12px; background: #fff; border-radius: 8px; }
 .key-panel code { display: block; margin: 12px 0; padding: 10px; border: 1px dashed var(--line-2); background: var(--surface); font: 600 14px/1.4 var(--font-mono); letter-spacing: 0.08em; }
 .setup-content form { display: grid; gap: 14px; align-content: start; }
 .code-input { text-align: center; font: 500 22px/1.2 var(--font-mono) !important; letter-spacing: 0.35em; }
