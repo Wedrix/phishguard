@@ -3,6 +3,7 @@
 - `adrs/`: accepted architectural decisions and their consequences.
 - `threat-model.md`: assets, boundaries, abuse cases, and controls.
 - `traceability.md`: requirements-to-implementation-to-test matrix.
+- `change-record.md`: append-only controlled baseline changes and acceptance boundary.
 - `debt-register.md`: deliberate limits and their upgrade triggers.
 - `privacy-notice.md`: user-facing processing and retention notice.
 - `provider-notice.md`: disclosure for consented third-party enrichment.

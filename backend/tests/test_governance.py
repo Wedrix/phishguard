@@ -117,7 +117,9 @@ def test_privileged_role_assignment_requires_assurance_and_revokes_sessions(clie
         )
         assert promoted.status_code == 200
         assert promoted.json()["role"] == "ANALYST"
-        assert member.get("/api/v1/me").status_code == 401
+        revoked = member.get("/api/v1/me")
+        assert revoked.status_code == 200
+        assert revoked.json()["session_kind"] == "ANONYMOUS"
 
         with app.state.session_factory() as db:
             sessions = list(db.scalars(select(ApplicationSession).where(ApplicationSession.user_id == user_id)))
@@ -136,7 +138,9 @@ def test_privileged_session_resolution_requires_mfa(client, app) -> None:
             assert user is not None
             user.role = "ANALYST"
             user.mfa_verified = False
-        assert member.get("/api/v1/me").status_code == 401
+        unresolved = member.get("/api/v1/me")
+        assert unresolved.status_code == 200
+        assert unresolved.json()["session_kind"] == "ANONYMOUS"
 
 
 def test_review_case_exposes_quarantined_feedback_and_updates_it_on_adjudication(client, app) -> None:

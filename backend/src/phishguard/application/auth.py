@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from phishguard.domain.types import Role
-from phishguard.infrastructure.models import ApplicationSession, UserAccount
+from phishguard.infrastructure.models import ApplicationSession, Scan, UserAccount
 
 
 class AuthenticationError(ValueError):
@@ -127,6 +127,48 @@ def create_user_session(
     db.add(row)
     db.flush()
     return Principal(row.id, user.id, role, csrf), token, csrf
+
+
+def adopt_guest_scans(
+    db: Session,
+    guest_session_id: str,
+    user_id: str,
+    retention_days: int,
+) -> int:
+    guest_session = db.scalar(
+        select(ApplicationSession)
+        .where(
+            ApplicationSession.id == guest_session_id,
+            ApplicationSession.user_id.is_(None),
+            ApplicationSession.revoked_at.is_(None),
+        )
+        .with_for_update()
+    )
+    if not guest_session:
+        return 0
+    current = datetime.now(UTC)
+    scans = list(
+        db.scalars(
+            select(Scan)
+            .where(
+                Scan.guest_session_id == guest_session.id,
+                Scan.owner_user_id.is_(None),
+                Scan.deleted_at.is_(None),
+                Scan.expires_at > current,
+            )
+            .with_for_update()
+        )
+    )
+    registered_expiry = current + timedelta(days=retention_days)
+    for scan in scans:
+        scan.owner_user_id = user_id
+        scan.guest_session_id = None
+        expiry = scan.expires_at if scan.expires_at.tzinfo else scan.expires_at.replace(tzinfo=UTC)
+        if expiry < registered_expiry:
+            scan.expires_at = registered_expiry
+    guest_session.revoked_at = current
+    db.flush()
+    return len(scans)
 
 
 def resolve_principal(db: Session, token: str | None) -> Principal | None:

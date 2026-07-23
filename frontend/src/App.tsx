@@ -38,6 +38,7 @@ import {
 import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
 import {
   Link,
+  Navigate,
   NavLink,
   Route,
   Routes,
@@ -56,11 +57,14 @@ import {
   type DecisionPolicy,
   type Experiment,
   type ModelRelease,
+  type PrivilegedRequestedRole,
   type ProviderConfiguration,
   type ResearchExport,
   type ReviewAction,
   type ReviewCase,
   type ReviewCaseDetail,
+  type RoleRequest,
+  type RequestedRole,
   type EvidenceObservation,
   type RiskBand,
   type Scan,
@@ -76,19 +80,19 @@ import {
   identityConfigured,
   IdentityError,
   requestPasswordReset,
-  signOutIdentity,
 } from "./identity";
+import { SessionProvider, useSession } from "./session";
 
-const publicNavigation = [
+const publicNavigation: { to: string; label: string; icon: Icon; session?: "GUEST_OR_USER" | "USER" }[] = [
   { to: "/", label: "Scan", icon: MagnifyingGlass },
-  { to: "/history", label: "History", icon: ClockCounterClockwise },
-  { to: "/account", label: "Account", icon: UserCircle },
+  { to: "/history", label: "History", icon: ClockCounterClockwise, session: "GUEST_OR_USER" },
+  { to: "/account", label: "Account", icon: UserCircle, session: "USER" },
 ];
 
 const workspaceNavigation = [
-  { to: "/analyst/cases", label: "Cases", icon: ListChecks },
-  { to: "/admin", label: "Administration", icon: SlidersHorizontal },
-  { to: "/research", label: "Research", icon: Flask },
+  { to: "/analyst/cases", label: "Cases", icon: ListChecks, roles: ["ANALYST", "ADMINISTRATOR"] },
+  { to: "/admin", label: "Administration", icon: SlidersHorizontal, roles: ["ADMINISTRATOR"] },
+  { to: "/research", label: "Research", icon: Flask, roles: ["RESEARCHER", "ADMINISTRATOR"] },
 ];
 
 const registeredRoles = ["REGISTERED_USER", "ANALYST", "ADMINISTRATOR", "RESEARCHER"];
@@ -105,11 +109,65 @@ function Brand() {
   );
 }
 
+function roleLabel(role: string) {
+  return role.toLowerCase().replaceAll("_", " ").replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+const REGISTRATION_INTENT_KEY = "phishguard.registration.intent";
+
+function registrationIntent(email: string): RequestedRole | undefined {
+  try {
+    const value = JSON.parse(sessionStorage.getItem(REGISTRATION_INTENT_KEY) ?? "null") as { email?: string; role?: RequestedRole } | null;
+    return value?.email?.trim().toLowerCase() === email.trim().toLowerCase() ? value.role : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function defaultRoute(role: string) {
+  if (role === "ADMINISTRATOR") return "/admin";
+  if (role === "ANALYST") return "/analyst/cases";
+  if (role === "RESEARCHER") return "/research";
+  return "/history";
+}
+
+function safeInternalFrom(value: string | null) {
+  if (!value || !value.startsWith("/") || value.startsWith("//") || value.includes("\\") || value.startsWith("/sign-in")) return undefined;
+  return value;
+}
+
 function Shell({ children }: { children: ReactNode }) {
   const location = useLocation();
   const navigate = useNavigate();
+  const session = useSession();
+  const previousPath = useRef(location.pathname);
+  const [signingOut, setSigningOut] = useState(false);
+  const [signOutWarning, setSignOutWarning] = useState("");
   const workspace = /^\/(analyst|admin|research)/.test(location.pathname);
-  const navigation = workspace ? workspaceNavigation : publicNavigation;
+  const authenticated = session.status === "ready" && session.me?.session_kind === "USER" && Boolean(session.me.role);
+  const hasGuestHistory = session.status === "ready" && ["GUEST", "USER"].includes(session.me?.session_kind ?? "ANONYMOUS");
+  const navigation = workspace
+    ? workspaceNavigation.filter((item) => session.me?.role && item.roles.includes(session.me.role))
+    : publicNavigation.filter((item) => !item.session || (item.session === "USER" ? authenticated : hasGuestHistory));
+  const workspaceRoute = authenticated && session.me?.role !== "REGISTERED_USER" ? defaultRoute(session.me?.role ?? "") : undefined;
+
+  useEffect(() => {
+    if (previousPath.current !== location.pathname) document.getElementById("main-content")?.focus();
+    previousPath.current = location.pathname;
+  }, [location.pathname]);
+
+  async function signOut() {
+    setSigningOut(true);
+    setSignOutWarning("");
+    try {
+      await session.signOut();
+    } catch {
+      setSignOutWarning("You were signed out locally, but remote session revocation could not be confirmed.");
+    } finally {
+      setSigningOut(false);
+      navigate("/sign-in", { replace: true });
+    }
+  }
 
   return (
     <div className="app" data-theme={workspace ? "dark" : "light"}>
@@ -117,16 +175,19 @@ function Shell({ children }: { children: ReactNode }) {
       <header className="topbar">
         <Brand />
         <div className="topbar-actions">
-          {workspace ? (
-            <>
-              <span className="environment"><Info aria-hidden weight="fill" /> Experimental workspace</span>
-              <Link className="user-chip" to="/account"><UserCircle aria-hidden /><span className="user-copy"><strong>Account</strong><small>Role-protected session</small></span></Link>
-            </>
+          {workspace && <span className="environment"><Info aria-hidden weight="fill" /> Experimental workspace</span>}
+          {authenticated ? (
+            <><Link className="user-chip" to="/account"><UserCircle aria-hidden /><span className="user-copy"><strong>Account</strong><small>{roleLabel(session.me?.role ?? "")}{session.me?.is_canonical_admin ? " · Canonical administrator" : ""}</small></span></Link>{!workspace && workspaceRoute && <Link className="button button-secondary button-small" to={workspaceRoute}>Open workspace</Link>}{!workspace && <button className="button button-secondary button-small" type="button" disabled={signingOut} onClick={signOut}><SignOut aria-hidden />{signingOut ? "Signing out…" : "Sign out"}</button>}</>
+          ) : session.status === "loading" ? (
+            <span className="session-status" role="status"><CircleNotch className="spinner" aria-hidden />Checking session</span>
+          ) : location.pathname === "/sign-in" ? (
+            <Link className="button button-secondary button-small" to="/"><GlobeHemisphereWest aria-hidden /> Scanner</Link>
           ) : (
             <Link className="button button-secondary button-small" to="/sign-in"><SignIn aria-hidden /> Sign in</Link>
           )}
         </div>
       </header>
+      {signOutWarning && <div className="session-warning alert alert-warning" role="status"><WarningCircle aria-hidden /><span>{signOutWarning}</span><button type="button" className="text-button" onClick={() => setSignOutWarning("")}>Dismiss</button></div>}
       <div className="shell-body">
         <aside className="sidebar" aria-label={workspace ? "Workspace navigation" : "Primary navigation"}>
           <p className="nav-label">{workspace ? "Workspace" : "PhishGuard"}</p>
@@ -140,7 +201,7 @@ function Shell({ children }: { children: ReactNode }) {
           {workspace ? (
             <div className="sidebar-footer">
               <Link to="/" className="nav-item"><GlobeHemisphereWest aria-hidden /><span>Public scanner</span></Link>
-              <button type="button" className="nav-item nav-button" onClick={async () => { await signOutIdentity(); navigate("/sign-in"); }}><SignOut aria-hidden /><span>Sign out</span></button>
+              {authenticated && <button type="button" className="nav-item nav-button" disabled={signingOut} onClick={signOut}><SignOut aria-hidden /><span>{signingOut ? "Signing out…" : "Sign out"}</span></button>}
             </div>
           ) : (
             <div className="privacy-note"><LockKey aria-hidden /><span><strong>Private by default</strong>Local-only scans do not contact the destination.</span></div>
@@ -165,24 +226,38 @@ function PageHeader({ eyebrow, title, description, actions }: { eyebrow?: string
   );
 }
 
+function StatePanel({ kind, title, detail, retry, signInTo = "/sign-in" }: { kind: "loading" | "error" | "empty" | "auth" | "forbidden"; title: string; detail: string; retry?: () => void; signInTo?: string }) {
+  const StateIcon = kind === "loading" ? CircleNotch : kind === "error" ? WarningCircle : kind === "auth" || kind === "forbidden" ? LockKey : Database;
+  return <div className={`empty-state card state-panel state-${kind}`} role={kind === "error" ? "alert" : kind === "loading" ? "status" : undefined} aria-busy={kind === "loading" || undefined}><StateIcon className={kind === "loading" ? "spinner" : undefined} aria-hidden /><h1>{title}</h1><p>{detail}</p>{kind === "auth" && <Link className="button button-primary" to={signInTo}>Sign in</Link>}{retry && <button className="button button-secondary" type="button" onClick={retry}><ArrowClockwise aria-hidden />Try again</button>}</div>;
+}
+
 function ProtectedRoute({ roles, children }: { roles: string[]; children: ReactNode }) {
-  const [state, setState] = useState<"loading" | "allowed" | "denied">("loading");
-  useEffect(() => {
-    let active = true;
-    api.me()
-      .then((me) => { if (active) setState(roles.includes(me.role) ? "allowed" : "denied"); })
-      .catch(() => { if (active) setState("denied"); });
-    return () => { active = false; };
-  }, [roles]);
-  if (state === "loading") return <div className="page narrow-page"><div className="skeleton skeleton-panel" aria-label="Checking access" /></div>;
-  if (state === "denied") return <div className="page narrow-page"><div className="empty-state card"><LockKey aria-hidden /><h1>Sign in required</h1><p>This workspace is available only to an authorised PhishGuard role.</p><Link className="button button-primary" to="/sign-in">Sign in</Link></div></div>;
+  const session = useSession();
+  const location = useLocation();
+  if (session.status === "loading") return <div className="page narrow-page"><StatePanel kind="loading" title="Checking access" detail="Verifying your current application session." /></div>;
+  if (session.status === "error") return <div className="page narrow-page"><StatePanel kind="error" title="Access check unavailable" detail={session.error} retry={() => { session.refresh().catch(() => undefined); }} /></div>;
+  if (session.me?.session_kind !== "USER" || !session.me.role) return <div className="page narrow-page"><StatePanel kind="auth" title="Sign in required" detail="Sign in with an authorised PhishGuard account to continue." signInTo={`/sign-in?from=${encodeURIComponent(location.pathname + location.search)}`} /></div>;
+  if (!roles.includes(session.me.role)) return <div className="page narrow-page"><StatePanel kind="forbidden" title="Access restricted" detail={`Your ${roleLabel(session.me.role)} role does not have access to this workspace.`} /></div>;
   return <>{children}</>;
 }
 
-function RiskBadge({ risk }: { risk: RiskBand }) {
-  const labels: Record<RiskBand, string> = { LOW: "Low risk", MEDIUM: "Needs caution", HIGH: "High risk", INCONCLUSIVE: "Inconclusive" };
-  const BadgeIcon: Icon = risk === "LOW" ? CheckCircle : risk === "MEDIUM" ? WarningCircle : risk === "HIGH" ? XCircle : Info;
-  return <span className={`badge badge-${risk.toLowerCase()}`}><BadgeIcon aria-hidden weight="fill" />{labels[risk]}</span>;
+export function verdictPresentation(risk: RiskBand, status: Scan["status"] = "COMPLETE") {
+  const presentations: Record<RiskBand, { label: string; title: string; summary: string; icon: Icon }> = {
+    LOW: { label: "Low risk", title: "No strong phishing indicators found.", summary: "The available evidence did not reveal strong phishing indicators.", icon: CheckCircle },
+    MEDIUM: { label: "Medium risk", title: "Use caution with this link.", summary: "The available evidence contains indicators that warrant caution.", icon: WarningCircle },
+    HIGH: { label: "High risk", title: "Avoid this link.", summary: "The available evidence contains strong phishing indicators.", icon: XCircle },
+    INCONCLUSIVE: { label: "Inconclusive", title: "Treat this link as unverified.", summary: "PhishGuard cannot reach a reliable risk conclusion from the available evidence.", icon: Info },
+  };
+  const presentation = presentations[risk];
+  return status === "PROCESSING"
+    ? { ...presentation, label: `Preliminary ${presentation.label.toLowerCase()}`, provisional: true }
+    : { ...presentation, provisional: false };
+}
+
+function RiskBadge({ risk, status }: { risk: RiskBand; status?: Scan["status"] }) {
+  const presentation = verdictPresentation(risk, status);
+  const BadgeIcon = presentation.icon;
+  return <span className={`badge badge-${risk.toLowerCase()}`}><BadgeIcon aria-hidden weight="fill" />{presentation.label}</span>;
 }
 
 function StatusBadge({ status }: { status: Scan["status"] }) {
@@ -323,8 +398,10 @@ function ResultPage({ shared = false }: { shared?: boolean }) {
   const [shareError, setShareError] = useState("");
   const [shareUrl, setShareUrl] = useState("");
   const [reportExpiresAt, setReportExpiresAt] = useState("");
+  const [completionAnnouncement, setCompletionAnnouncement] = useState("");
   const shareDialog = useRef<HTMLDialogElement>(null);
   const loadedTarget = useRef<string | null>(null);
+  const previousScanStatus = useRef<{ target: string; status: Scan["status"] } | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -336,6 +413,7 @@ function ResultPage({ shared = false }: { shared?: boolean }) {
       setScan(null);
       setError("");
       setPollingPause(null);
+      setCompletionAnnouncement("");
     }
     async function load() {
       try {
@@ -352,6 +430,11 @@ function ResultPage({ shared = false }: { shared?: boolean }) {
           pollAfterMs = update.poll_after_ms;
         }
         if (!active) return;
+        const previous = previousScanStatus.current;
+        if (previous?.target === target && previous.status === "PROCESSING" && next.status !== "PROCESSING") {
+          setCompletionAnnouncement(`Analysis complete. ${verdictPresentation(next.decision.risk_band, next.status).label}. ${next.decision.completion === "PARTIAL" ? "Partial evidence coverage." : "Complete evidence coverage."}`);
+        }
+        previousScanStatus.current = { target, status: next.status };
         loadedTarget.current = target;
         setScan(next);
         if (nextReportExpiresAt) setReportExpiresAt(nextReportExpiresAt);
@@ -390,8 +473,16 @@ function ResultPage({ shared = false }: { shared?: boolean }) {
   if (!scan) return <ResultSkeleton />;
 
   const { decision } = scan;
-  const RiskIcon: Icon = decision.risk_band === "HIGH" ? XCircle : decision.risk_band === "MEDIUM" ? WarningCircle : decision.risk_band === "LOW" ? CheckCircle : Info;
-  const title = decision.risk_band === "HIGH" ? "Strong phishing indicators found" : decision.risk_band === "MEDIUM" ? "Treat this link with caution" : decision.risk_band === "LOW" ? "No strong indicators found" : "There is not enough evidence";
+  const presentation = verdictPresentation(decision.risk_band, scan.status);
+  const RiskIcon = presentation.icon;
+  const limitedCoverage = decision.completion === "PARTIAL" || scan.status === "PARTIAL";
+  const openLimitations = limitedCoverage || decision.risk_band === "INCONCLUSIVE" || decision.missing_evidence.length > 0;
+  const riskGuidance: Record<RiskBand, { className: string; content: ReactNode }> = {
+    HIGH: { className: "alert-danger", content: <><strong>Do not open this link or enter any information.</strong>Use a known address or verified bookmark instead.</> },
+    MEDIUM: { className: "alert-warning", content: <><strong>Verify the request through a trusted channel.</strong>Do not rely on contact details provided with the link.</> },
+    LOW: { className: "alert-info", content: <><strong>Continue only if this link is expected and you recognise the sender.</strong>Low risk is not proof that a link is safe.</> },
+    INCONCLUSIVE: { className: "alert-warning", content: <><strong>Treat this link as unverified.</strong>Use a known address or independently confirm the request before proceeding.</> },
+  };
 
   async function copyReport() {
     setSharing(true);
@@ -416,6 +507,7 @@ function ResultPage({ shared = false }: { shared?: boolean }) {
 
   return (
     <div className="page result-page">
+      <div className="sr-only" aria-live="polite" aria-atomic="true">{completionAnnouncement}</div>
       <div className="result-toolbar">
         <Link className="back-link" to="/"><CaretRight aria-hidden /> New scan</Link>
         {!shared && <div>
@@ -428,29 +520,31 @@ function ResultPage({ shared = false }: { shared?: boolean }) {
       <section className={`risk-summary risk-${decision.risk_band.toLowerCase()}`} aria-labelledby="result-title">
         <div className="risk-icon"><RiskIcon aria-hidden weight="fill" /></div>
         <div className="risk-content">
-          <div className="result-badges"><RiskBadge risk={decision.risk_band} /><StatusBadge status={scan.status} /><span className="badge badge-neutral">{decision.analysis_scope === "LOCAL_ONLY" ? "Local only" : "Enriched"}</span>{decision.engine_mode === "RULE_ONLY" && <span className="badge badge-medium"><ShieldWarning aria-hidden weight="fill" />Rule-only fallback</span>}</div>
-          <h1 id="result-title">{title}</h1>
+          <div className="result-badges"><RiskBadge risk={decision.risk_band} status={scan.status} /><StatusBadge status={scan.status} /><span className="badge badge-neutral">{decision.analysis_scope === "LOCAL_ONLY" ? "Local only" : "Enriched"}</span>{limitedCoverage && <span className="badge badge-medium"><WarningCircle aria-hidden weight="fill" />Partial coverage</span>}{decision.engine_mode === "RULE_ONLY" && <span className="badge badge-medium"><ShieldWarning aria-hidden weight="fill" />Rule-only fallback</span>}</div>
+          <h1 id="result-title">{presentation.title}</h1>
           <p className="display-url">{scan.display_url}{scan.ascii_display_url && <small>ASCII: {scan.ascii_display_url}</small>}</p>
-          <p>{decision.reasons[0]}</p>
-          {scan.status === "PROCESSING" && (pollingPause ? <div className={`alert ${pollingPause.reason === "error" ? "alert-danger" : "alert-warning"} polling-paused`} role={pollingPause.reason === "error" ? "alert" : "status"}><WarningCircle aria-hidden /><span><strong>Automatic updates paused.</strong>{pollingPause.message}</span><button className="button button-secondary button-small" type="button" onClick={retryPolling}><ArrowClockwise aria-hidden />Check again</button></div> : <div className="progress-note" role="status"><CircleNotch className="spinner" aria-hidden /><span><strong>Local analysis complete.</strong> Isolated enrichment is still collecting evidence. This page updates automatically.</span></div>)}
+          <p>{decision.reasons[0] || presentation.summary}</p>
+          {limitedCoverage && <div className="alert alert-warning coverage-note"><WarningCircle aria-hidden /><span><strong>Partial evidence coverage.</strong>Some checks were unavailable. Missing evidence did not lower the risk.</span></div>}
+          {decision.engine_mode === "RULE_ONLY" && <div className="alert alert-warning coverage-note"><ShieldWarning aria-hidden /><span><strong>Rule-only result.</strong>The approved model was unavailable, so this decision uses deterministic rules and available evidence only.</span></div>}
+          {scan.status === "PROCESSING" && (pollingPause ? <div className={`alert ${pollingPause.reason === "error" ? "alert-danger" : "alert-warning"} polling-paused`} role={pollingPause.reason === "error" ? "alert" : "status"}><WarningCircle aria-hidden /><span><strong>Automatic updates paused.</strong>{pollingPause.message}</span><button className="button button-secondary button-small" type="button" onClick={retryPolling}><ArrowClockwise aria-hidden />Check again</button></div> : <div className="progress-note" role="status"><CircleNotch className="spinner" aria-hidden /><span><strong>External checks are still running; risk may increase.</strong>This page updates automatically when enrichment finishes.</span></div>)}
         </div>
       </section>
 
       <div className="result-grid">
         <section className="result-sections" aria-label="Analysis details">
           <ResultSection title="Reasons" icon={ShieldWarning} count={decision.reasons.length} open>
-            <ul className="finding-list">{decision.reasons.map((reason, index) => <li key={reason}><span>{index + 1}</span><p>{reason}</p></li>)}</ul>
+            {decision.reasons.length ? <ul className="finding-list">{decision.reasons.map((reason, index) => <li key={reason}><span>{index + 1}</span><p>{reason}</p></li>)}</ul> : <p className="section-empty">No specific risk reasons were recorded for this decision.</p>}
             {decision.counter_evidence.length > 0 && <div className="counter-evidence"><CheckCircle aria-hidden /><div><strong>Counter-evidence</strong>{decision.counter_evidence.map((item) => <p key={item}>{item}</p>)}</div></div>}
           </ResultSection>
           <ResultSection title="Evidence" icon={ClipboardText} count={decision.evidence.length}>
-            <div className="evidence-table" role="table" aria-label="Evidence observations">
+            {decision.evidence.length ? <div className="evidence-table" role="table" aria-label="Evidence observations">
               <div className="evidence-row evidence-head" role="row"><span role="columnheader">Observation</span><span role="columnheader">State</span><span role="columnheader">Source</span></div>
               {decision.evidence.map((item) => <EvidenceRow key={item.id} item={item} />)}
-            </div>
+            </div> : <p className="section-empty">No evidence observations were stored for this decision.</p>}
           </ResultSection>
-          <ResultSection title="Limitations" icon={Info} count={decision.limitations.length + decision.missing_evidence.length}>
+          <ResultSection title="Limitations" icon={Info} count={decision.limitations.length + decision.missing_evidence.length} open={openLimitations}>
             {decision.missing_evidence.map((item) => <div className="alert alert-warning" key={item}><WarningCircle aria-hidden /><span>{item}</span></div>)}
-            <ul className="plain-list">{decision.limitations.map((item) => <li key={item}>{item}</li>)}</ul>
+            {decision.limitations.length ? <ul className="plain-list">{decision.limitations.map((item) => <li key={item}>{item}</li>)}</ul> : decision.missing_evidence.length === 0 && <p className="section-empty">No additional limitations were recorded.</p>}
           </ResultSection>
           <ResultSection title="Technical details" icon={FileText}>
             <dl className="technical-grid">
@@ -465,16 +559,16 @@ function ResultPage({ shared = false }: { shared?: boolean }) {
         </section>
         <aside className="next-actions card">
           <h2>What to do next</h2>
-          <ul>{decision.safe_actions.map((action) => <li key={action}><Check aria-hidden /><span>{action}</span></li>)}</ul>
-          <div className="alert alert-danger"><LockKey aria-hidden /><span><strong>Do not open the submitted link.</strong> Use a known address or verified bookmark instead.</span></div>
+          <ul>{(decision.safe_actions.length ? decision.safe_actions : ["Use a known address or verified bookmark for sensitive tasks."]).map((action) => <li key={action}><Check aria-hidden /><span>{action}</span></li>)}</ul>
+          <div className={`alert ${riskGuidance[decision.risk_band].className}`}><LockKey aria-hidden /><span>{riskGuidance[decision.risk_band].content}</span></div>
         </aside>
       </div>
 
-      {!shared && <dialog ref={shareDialog} className="dialog" onClick={(event) => { if (event.target === shareDialog.current) shareDialog.current.close(); }}>
+      {!shared && <dialog ref={shareDialog} className="dialog" aria-modal="true" aria-labelledby="share-report-title" aria-describedby="share-report-description" onClick={(event) => { if (event.target === shareDialog.current) shareDialog.current.close(); }}>
         <form method="dialog">
           <div className="dialog-icon"><Eye aria-hidden /></div>
-          <h2>Share a redacted report</h2>
-          <p>The temporary report does not reveal the original URL or account details.</p>
+          <h2 id="share-report-title">Share a redacted report</h2>
+          <p id="share-report-description">The temporary report does not reveal the original URL or account details.</p>
           <div className="copy-row"><code>{shareUrl || "A new unguessable link will be created."}</code>{shareUrl && <button type="button" className="icon-button" onClick={copyReport} aria-label="Copy report link">{copied ? <Check aria-hidden /> : <Copy aria-hidden />}</button>}</div>
           {reportExpiresAt && <p className="field-hint">Expires {formatDate(reportExpiresAt)}</p>}
           {shareError && <div className="alert alert-danger" role="alert"><WarningCircle aria-hidden /><span>{shareError}</span></div>}
@@ -514,7 +608,12 @@ function HistoryPage() {
   const [deleting, setDeleting] = useState(false);
   const deleteDialog = useRef<HTMLDialogElement>(null);
 
-  useEffect(() => { api.listScans().then(setScans).catch(() => setError("History could not be loaded.")).finally(() => setLoading(false)); }, []);
+  function loadHistory() {
+    setLoading(true);
+    setError("");
+    api.listScans().then(setScans).catch(() => setError("History could not be loaded.")).finally(() => setLoading(false));
+  }
+  useEffect(loadHistory, []);
   useEffect(() => {
     const dialog = deleteDialog.current;
     if (!deleteTarget || !dialog || dialog.open) return;
@@ -557,26 +656,26 @@ function HistoryPage() {
   return (
     <div className="page">
       <PageHeader eyebrow="Your account" title="Scan history" description="Only redacted URLs are shown here. Delete records whenever you no longer need them." actions={<Link className="button button-primary" to="/"><MagnifyingGlass aria-hidden /> New scan</Link>} />
-      {scans.some((scan) => scan.simulated || scan.id.startsWith("demo-")) && <SimulatedDataBanner />}
-      {error && <div className="alert alert-danger" role="alert"><WarningCircle aria-hidden />{error}</div>}
       {notice && <div className="alert alert-success history-notice" role="status"><CheckCircle aria-hidden />{notice}</div>}
-      {loading ? <div className="skeleton skeleton-panel" /> : scans.length === 0 ? (
+      {loading ? <div className="skeleton skeleton-panel" role="status" aria-label="Loading scan history" /> : error ? (
+        <StatePanel kind="error" title="History unavailable" detail={error} retry={loadHistory} />
+      ) : scans.length === 0 ? (
         <div className="empty-state card"><ClockCounterClockwise aria-hidden /><h2>No saved scans</h2><p>Your completed scans will appear here.</p><Link className="button button-primary" to="/">Analyze a URL</Link></div>
       ) : (
-        <div className="table-card">
+        <>{scans.some((scan) => scan.simulated || scan.id.startsWith("demo-")) && <SimulatedDataBanner />}<div className="table-card">
           <div className="data-table history-data-table" role="table" aria-label="Scan history">
             <div className="data-row data-head" role="row"><span role="columnheader">URL</span><span role="columnheader">Risk</span><span role="columnheader">Scope</span><span role="columnheader">Scanned</span><span role="columnheader"><span className="sr-only">Actions</span></span></div>
             {scans.map((scan) => (
               <div className="data-row" role="row" key={scan.id}>
                 <span role="cell"><Link className="table-link" to={`/scan/${scan.id}`}>{scan.display_url}</Link><small>{scan.id.slice(0, 16)}</small></span>
-                <span role="cell"><RiskBadge risk={scan.decision.risk_band} /></span>
+                <span role="cell"><RiskBadge risk={scan.decision.risk_band} status={scan.status} /></span>
                 <span role="cell">{scan.decision.analysis_scope === "LOCAL_ONLY" ? "Local only" : "Enriched"}</span>
                 <span role="cell">{formatDate(scan.created_at)}</span>
                 <span role="cell" className="row-actions"><Link className="icon-button" aria-label={`View scan for ${scan.display_url}`} to={`/scan/${scan.id}`}><CaretRight aria-hidden /></Link><button className="icon-button" type="button" aria-label={`Delete scan for ${scan.display_url}`} onClick={() => askToDelete(scan)}><Trash aria-hidden /></button></span>
               </div>
             ))}
           </div>
-        </div>
+        </div></>
       )}
       {deleteTarget && <dialog ref={deleteDialog} className="dialog" aria-modal="true" aria-labelledby="delete-scan-title" aria-describedby="delete-scan-description" onCancel={(event) => { if (deleting) event.preventDefault(); }} onClose={() => { if (!deleting) { setDeleteTarget(null); setDeleteError(""); } }}>
         <form onSubmit={confirmDelete} aria-busy={deleting}>
@@ -594,23 +693,17 @@ function HistoryPage() {
 
 function AccountPage() {
   const navigate = useNavigate();
-  const [account, setAccount] = useState<Awaited<ReturnType<typeof api.me>> | null>(null);
+  const session = useSession();
+  const account = session.me;
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [retentionDays, setRetentionDays] = useState(30);
+  const [retentionDays, setRetentionDays] = useState(account?.scan_retention_days ?? account?.scan_retention_max_days ?? 30);
+  const [requestedRole, setRequestedRole] = useState<PrivilegedRequestedRole>("ANALYST");
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [pendingAction, setPendingAction] = useState<(() => Promise<void>) | null>(null);
   const deleteDialog = useRef<HTMLDialogElement>(null);
-  useEffect(() => {
-    let active = true;
-    api.me().then((value) => {
-      if (!active) return;
-      setAccount(value);
-      setRetentionDays(value.scan_retention_days ?? value.scan_retention_max_days ?? 30);
-    }).catch(() => { if (active) setError("Account details could not be loaded."); });
-    return () => { active = false; };
-  }, []);
+  useEffect(() => { setRetentionDays(account?.scan_retention_days ?? account?.scan_retention_max_days ?? 30); }, [account?.scan_retention_days, account?.scan_retention_max_days]);
   useEffect(() => {
     const dialog = deleteDialog.current;
     if (!confirmDelete || !dialog || dialog.open) return;
@@ -619,8 +712,11 @@ function AccountPage() {
   }, [confirmDelete]);
 
   async function signOut() {
-    await signOutIdentity();
-    navigate("/sign-in");
+    try {
+      await session.signOut();
+    } finally {
+      navigate("/sign-in", { replace: true });
+    }
   }
 
   async function runProtected(action: () => Promise<void>) {
@@ -653,13 +749,26 @@ function AccountPage() {
 
   async function saveRetention() {
     const result = await api.updateAccountRetention(retentionDays);
-    setAccount((current) => current ? { ...current, scan_retention_days: result.scan_retention_days } : current);
+    if (account) session.accept({ ...account, scan_retention_days: result.scan_retention_days });
     setNotice(`New scans will be retained for ${result.scan_retention_days} days.`);
+  }
+
+  async function requestRoleAccess() {
+    const roleRequest = await api.createRoleRequest(requestedRole);
+    if (account) session.accept({ ...account, role_request: roleRequest });
+    setNotice(`${roleLabel(requestedRole)} access was requested for administrator review.`);
+  }
+
+  async function cancelRoleAccess() {
+    if (!account?.role_request) return;
+    await api.cancelRoleRequest(account.role_request.id);
+    session.accept({ ...account, role_request: null });
+    setNotice("The pending role request was cancelled.");
   }
 
   async function deleteAllScanData() {
     await api.deleteAccountScans();
-    try { await signOutIdentity(); } catch { /* The API session was already revoked by deletion. */ }
+    try { await session.signOut(); } catch { /* The API session was already revoked by deletion. */ }
     navigate("/sign-in", { replace: true });
   }
 
@@ -671,7 +780,8 @@ function AccountPage() {
       <PageHeader eyebrow="Your account" title="Privacy and account" description="Review the application session and available privacy controls." />
       {error && <div className="alert alert-danger" role="alert"><WarningCircle aria-hidden />{error}</div>}
       {notice && <div className="alert alert-success" role="status"><CheckCircle aria-hidden />{notice}</div>}
-      {!account && !error ? <div className="skeleton skeleton-panel" aria-label="Loading account" /> : account && <section className="settings-section"><h2>Application session</h2><div className="settings-card stacked"><dl className="account-facts"><div><dt>Role</dt><dd>{account.role.replaceAll("_", " ")}</dd></div><div><dt>User ID</dt><dd className="mono">{account.user_id ?? "Not available"}</dd></div></dl><button className="button button-secondary" type="button" onClick={signOut}><SignOut aria-hidden /> Sign out</button></div></section>}
+      <section className="settings-section"><h2>Application session</h2><div className="settings-card stacked"><dl className="account-facts"><div><dt>Role</dt><dd>{roleLabel(account?.role ?? "GUEST")} {account?.is_canonical_admin && <span className="badge badge-neutral">Canonical administrator</span>}</dd></div><div><dt>User ID</dt><dd className="mono">{account?.user_id ?? "Not available"}</dd></div></dl><button className="button button-secondary" type="button" onClick={signOut}><SignOut aria-hidden /> Sign out</button></div></section>
+      {account?.role === "REGISTERED_USER" && <section className="settings-section"><h2>Workspace access</h2><div className="settings-card role-request-card">{account.role_request?.state === "PENDING" ? <><div><strong>{roleLabel(account.role_request.requested_role)} access pending</strong><small>Requested {formatDate(account.role_request.requested_at)}. An administrator must review this request.</small></div><span className="badge badge-medium"><ClockCounterClockwise aria-hidden />Pending review</span><button className="button button-secondary" type="button" disabled={busy} onClick={() => runProtected(cancelRoleAccess)}>Cancel request</button></> : <><div><strong>Request a governed role</strong><small>Analyst and researcher access require verified email, TOTP and administrator approval.</small></div><label className="field compact-field"><span>Requested role</span><select value={requestedRole} onChange={(event) => setRequestedRole(event.target.value as PrivilegedRequestedRole)}><option value="ANALYST">Analyst</option><option value="RESEARCHER">Researcher</option></select></label><button className="button button-secondary" type="button" disabled={busy} onClick={() => runProtected(requestRoleAccess)}>Request access</button></>}</div></section>}
       <section className="settings-section"><h2>Security</h2><div className="settings-list"><Link to="/totp"><span><Key aria-hidden /><span><strong>Authenticator app</strong><small>Enroll or update TOTP through Identity Platform.</small></span></span><CaretRight aria-hidden /></Link></div></section>
       <section className="settings-section"><h2>Data controls</h2><div className="settings-card account-data-controls"><div><strong>Scan retention</strong><small>Applies to new scans. The application policy permits up to {retentionMaximum} days.</small></div><div className="retention-control"><label htmlFor="retention-days">Keep new scans for</label><select id="retention-days" value={retentionDays} onChange={(event) => setRetentionDays(Number(event.target.value))}>{retentionOptions.map((days) => <option value={days} key={days}>{days} {days === 1 ? "day" : "days"}</option>)}</select><button className="button button-secondary" type="button" disabled={busy || retentionDays === account?.scan_retention_days} onClick={() => runProtected(saveRetention)}>Save retention</button></div><div className="account-action"><span><strong>Download your data</strong><small>Exports redacted scan history and stored decisions as JSON. Original URLs are never included.</small></span><button className="button button-secondary" type="button" disabled={busy} onClick={() => runProtected(downloadExport)}><FileText aria-hidden /> Download JSON</button></div><Link className="button button-secondary account-history-link" to="/history">Open scan history</Link></div></section>
       <section className="settings-section danger-zone"><h2>Delete scan data</h2><div className="settings-card"><p>Delete every scan owned by this application account, revoke shared reports and application sessions, and sign out. Your Google Identity Platform identity is not deleted.</p><button className="button button-danger" type="button" disabled={busy} onClick={() => setConfirmDelete(true)}><Trash aria-hidden /> Delete all scan data</button></div></section>
@@ -683,8 +793,11 @@ function AccountPage() {
 
 function SignInPage() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const session = useSession();
   const configured = identityConfigured();
   const [mode, setMode] = useState<"sign-in" | "register" | "reset">("sign-in");
+  const [requestedRole, setRequestedRole] = useState<RequestedRole>("REGISTERED_USER");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
@@ -692,6 +805,10 @@ function SignInPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const heading = useRef<HTMLHeadingElement>(null);
+  const requestedDestination = safeInternalFrom(new URLSearchParams(location.search).get("from"));
+
+  useEffect(() => { heading.current?.focus(); }, [mode, mfaFactor]);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -704,10 +821,13 @@ function SignInPage() {
     setBusy(true);
     try {
       if (mfaFactor) {
-        await completeTotpSignIn(code);
-        navigate("/history");
+        const nextSession = await completeTotpSignIn(code);
+        session.accept(nextSession);
+        sessionStorage.removeItem(REGISTRATION_INTENT_KEY);
+        navigate(requestedDestination ?? nextSession.default_route ?? defaultRoute(nextSession.role), { replace: true });
       } else if (mode === "register") {
         await createPasswordAccount(email, password);
+        sessionStorage.setItem(REGISTRATION_INTENT_KEY, JSON.stringify({ email: email.trim().toLowerCase(), role: requestedRole }));
         setNotice("Check your inbox to verify your email address before signing in.");
         setMode("sign-in");
         setPassword("");
@@ -715,12 +835,14 @@ function SignInPage() {
         await requestPasswordReset(email);
         setNotice("If an eligible account exists, Identity Platform will send recovery instructions.");
       } else {
-        const result = await beginPasswordSignIn(email, password);
+        const result = await beginPasswordSignIn(email, password, registrationIntent(email));
         if (result.mfaRequired) {
           setMfaFactor(result.factorName);
           setPassword("");
         } else {
-          navigate("/history");
+          session.accept(result.session);
+          sessionStorage.removeItem(REGISTRATION_INTENT_KEY);
+          navigate(requestedDestination ?? result.session.default_route ?? defaultRoute(result.session.role), { replace: true });
         }
       }
     } catch (reason) {
@@ -732,13 +854,16 @@ function SignInPage() {
 
   const title = mfaFactor ? "Enter your verification code" : mode === "register" ? "Create your PhishGuard account" : mode === "reset" ? "Recover your account" : "Sign in to PhishGuard";
   const description = mfaFactor ? `Use the current code from ${mfaFactor}.` : mode === "register" ? "Identity Platform securely manages your password and email verification." : mode === "reset" ? "Recovery is handled by Google Identity Platform." : "Review your history and manage protected reports.";
+  if (session.status === "loading") return <div className="page narrow-page"><StatePanel kind="loading" title="Checking your session" detail="Confirming whether you are already signed in." /></div>;
+  if (session.status === "ready" && session.me?.session_kind === "USER" && session.me.role) return <Navigate to={requestedDestination ?? session.me.default_route ?? defaultRoute(session.me.role)} replace />;
   return (
     <div className="auth-page">
       <section className="auth-card card">
-        <div className="auth-heading"><span className="auth-icon"><LockKey aria-hidden /></span><h1>{title}</h1><p>{description}</p></div>
+        <div className="auth-heading"><span className="auth-icon"><LockKey aria-hidden /></span><h1 ref={heading} tabIndex={-1}>{title}</h1><p>{description}</p></div>
         <form onSubmit={submit}>
           {!mfaFactor && <label className="field"><span>Email address</span><input type="email" autoComplete="email" required placeholder="name@university.edu" value={email} onChange={(event) => setEmail(event.target.value)} /></label>}
           {!mfaFactor && mode !== "reset" && <label className="field"><span>Password</span><input type="password" autoComplete={mode === "register" ? "new-password" : "current-password"} minLength={8} required value={password} onChange={(event) => setPassword(event.target.value)} /></label>}
+          {!mfaFactor && mode === "register" && <label className="field"><span>Intended account role</span><select value={requestedRole} onChange={(event) => setRequestedRole(event.target.value as RequestedRole)}><option value="REGISTERED_USER">Registered user</option><option value="ANALYST">Analyst (approval required)</option><option value="RESEARCHER">Researcher (approval required)</option></select><small className="field-hint">Privileged access is only requested after email verification and sign-in. It also requires TOTP and administrator approval.</small></label>}
           {mfaFactor && <label className="field"><span>6-digit verification code</span><input className="code-input" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} autoComplete="one-time-code" required placeholder="000000" value={code} onChange={(event) => setCode(event.target.value.replace(/\D/g, ""))} /></label>}
           {!mfaFactor && mode === "sign-in" && <div className="form-row"><span className="field-hint">Sessions expire after 8 hours.</span><button type="button" className="text-button" onClick={() => setMode("reset")}>Forgot password?</button></div>}
           {!configured && <div className="alert alert-warning" role="status"><Info aria-hidden /><span>Configure the Firebase web client environment before using account features.</span></div>}
@@ -808,9 +933,23 @@ function FeedbackPage() {
   const [verdict, setVerdict] = useState("");
   const [comment, setComment] = useState("");
   const [sent, setSent] = useState(false);
-  async function submit(event: FormEvent) { event.preventDefault(); await api.submitFeedback(scanId, verdict, comment); setSent(true); }
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      await api.submitFeedback(scanId, verdict, comment);
+      setSent(true);
+    } catch (reason) {
+      setError(apiMessage(reason, "Feedback could not be submitted. Try again."));
+    } finally {
+      setBusy(false);
+    }
+  }
   if (sent) return <div className="page narrow-page"><div className="empty-state card"><CheckCircle aria-hidden /><h1>Feedback received</h1><p>Your report is quarantined for independent analyst review. It does not change the original result.</p><Link className="button button-primary" to={`/scan/${scanId}`}>Return to result</Link></div></div>;
-  return <div className="page narrow-page"><PageHeader eyebrow="Improve the evidence" title="Report an incorrect result" description="Feedback is reviewed independently and never becomes training data automatically." /><form className="card feedback-card" onSubmit={submit}><fieldset><legend>What seems wrong?</legend><div className="feedback-choices"><label className={verdict === "should_be_high" ? "selected" : ""}><input type="radio" name="verdict" value="should_be_high" required onChange={(event) => setVerdict(event.target.value)} /><ThumbsDown aria-hidden /><span><strong>This link is more dangerous</strong><small>The displayed risk is too low.</small></span></label><label className={verdict === "should_be_low" ? "selected" : ""}><input type="radio" name="verdict" value="should_be_low" onChange={(event) => setVerdict(event.target.value)} /><ThumbsUp aria-hidden /><span><strong>This link is safer</strong><small>The displayed risk is too high.</small></span></label></div></fieldset><label className="field"><span>What evidence should we review? <small>Optional</small></span><textarea maxLength={1000} rows={5} value={comment} onChange={(event) => setComment(event.target.value)} placeholder="Do not include passwords or other sensitive information." /><small className="character-count">{comment.length} / 1000</small></label><div className="form-actions"><Link className="button button-secondary" to={`/scan/${scanId}`}>Cancel</Link><button className="button button-primary" disabled={!verdict}>Submit feedback</button></div></form></div>;
+  return <div className="page narrow-page"><PageHeader eyebrow="Improve the evidence" title="Report an incorrect result" description="Feedback is reviewed independently and never becomes training data automatically." /><form className="card feedback-card" onSubmit={submit} aria-busy={busy}><fieldset disabled={busy}><legend>What seems wrong?</legend><div className="feedback-choices"><label className={verdict === "should_be_high" ? "selected" : ""}><input type="radio" name="verdict" value="should_be_high" required onChange={(event) => setVerdict(event.target.value)} /><ThumbsDown aria-hidden /><span><strong>This link is more dangerous</strong><small>The displayed risk is too low.</small></span></label><label className={verdict === "should_be_low" ? "selected" : ""}><input type="radio" name="verdict" value="should_be_low" onChange={(event) => setVerdict(event.target.value)} /><ThumbsUp aria-hidden /><span><strong>This link is safer</strong><small>The displayed risk is too high.</small></span></label></div></fieldset><label className="field"><span>What evidence should we review? <small>Optional</small></span><textarea maxLength={1000} rows={5} value={comment} disabled={busy} onChange={(event) => setComment(event.target.value)} placeholder="Do not include passwords or other sensitive information." /><small className="character-count">{comment.length} / 1000</small></label>{error && <div className="alert alert-danger" role="alert"><WarningCircle aria-hidden /><span>{error}</span></div>}<div className="form-actions"><Link className="button button-secondary" aria-disabled={busy} to={`/scan/${scanId}`}>Cancel</Link><button className="button button-primary" disabled={!verdict || busy}>{busy ? <><CircleNotch className="spinner" aria-hidden />Submitting…</> : "Submit feedback"}</button></div></form></div>;
 }
 
 function apiMessage(reason: unknown, fallback: string) {
@@ -818,7 +957,7 @@ function apiMessage(reason: unknown, fallback: string) {
 }
 
 function WorkspaceFailure({ message, retry }: { message: string; retry: () => void }) {
-  return <div className="empty-state card"><WarningCircle aria-hidden /><h2>Data unavailable</h2><p>{message}</p><button className="button button-secondary" type="button" onClick={retry}>Try again</button></div>;
+  return <StatePanel kind="error" title="Data unavailable" detail={message} retry={retry} />;
 }
 
 function WorkspaceEmpty({ title, detail }: { title: string; detail: string }) {
@@ -981,7 +1120,7 @@ function FreshAuthDialog({ action, close }: { action: () => Promise<void>; close
 function AdminPage() {
   const [tab, setTab] = useState("Overview");
   const [pendingAction, setPendingAction] = useState<(() => Promise<void>) | null>(null);
-  const tabs = ["Overview", "Users", "Providers", "Policies & models", "Audit"];
+  const tabs = ["Overview", "Users", "Role requests", "Providers", "Policies & models", "Audit"];
   const runSensitive: SensitiveActionRunner = async (action) => {
     try {
       await action();
@@ -993,7 +1132,7 @@ function AdminPage() {
       throw reason;
     }
   };
-  return <div className="page workspace-page"><PageHeader eyebrow="System administration" title="Control centre" description="Manage persisted governed configuration and inspect the health data exposed by the API." /><div className="tabs" role="tablist" aria-label="Administration sections">{tabs.map((item) => <button role="tab" aria-selected={tab === item} key={item} onClick={() => setTab(item)}>{item}</button>)}</div>{tab === "Overview" ? <AdminOverview /> : tab === "Users" ? <AdminUsers runSensitive={runSensitive} /> : tab === "Providers" ? <AdminProviders runSensitive={runSensitive} /> : tab === "Policies & models" ? <AdminReleases runSensitive={runSensitive} /> : <AdminAudit />}{pendingAction && <FreshAuthDialog action={pendingAction} close={() => setPendingAction(null)} />}</div>;
+  return <div className="page workspace-page"><PageHeader eyebrow="System administration" title="Control centre" description="Manage persisted governed configuration and inspect the health data exposed by the API." /><div className="tabs" aria-label="Administration sections">{tabs.map((item) => <button type="button" className={tab === item ? "active" : ""} key={item} onClick={() => setTab(item)}>{item}</button>)}</div>{tab === "Overview" ? <AdminOverview /> : tab === "Users" ? <AdminUsers runSensitive={runSensitive} /> : tab === "Role requests" ? <AdminRoleRequests runSensitive={runSensitive} /> : tab === "Providers" ? <AdminProviders runSensitive={runSensitive} /> : tab === "Policies & models" ? <AdminReleases runSensitive={runSensitive} /> : <AdminAudit />}{pendingAction && <FreshAuthDialog action={pendingAction} close={() => setPendingAction(null)} />}</div>;
 }
 
 function AdminOverview() {
@@ -1005,10 +1144,14 @@ function AdminOverview() {
   if (error) return <WorkspaceFailure message={error} retry={load} />;
   if (!health) return null;
   const jobTotal = Object.values(health.jobs).reduce((total, count) => total + count, 0);
-  return <><div className="metric-grid"><Metric label="Database" value={health.database} detail="API connectivity check" icon={HardDrives} /><Metric label="Recorded jobs" value={String(jobTotal)} detail="Across persisted states" icon={ListChecks} /><Metric label="Job states" value={String(Object.keys(health.jobs).length)} detail={`Checked ${formatDate(health.checked_at)}`} icon={SlidersHorizontal} /></div><section className="card admin-table-section"><div className="section-heading"><div><p className="eyebrow">PostgreSQL queue</p><h2>Jobs by state</h2></div></div>{Object.keys(health.jobs).length ? <dl className="version-list">{Object.entries(health.jobs).sort().map(([state, count]) => <div key={state}><dt>{state.replaceAll("_", " ")}</dt><dd>{count}</dd></div>)}</dl> : <p className="muted-copy">No persisted scan jobs were reported.</p>}<div className="alert alert-info"><Info aria-hidden /><span><strong>Limited health surface.</strong>Availability, latency, provider health, backups, and pod status are not exposed by this API.</span></div></section></>;
+  const canonicalStatus = health.canonical_admin?.status;
+  const canonicalLabel = canonicalStatus === "CONFIGURED" ? "Configured" : canonicalStatus === "MISSING" ? "Missing" : "Not reported";
+  const canonicalDetail = health.canonical_admin ? `${health.canonical_admin.count} canonical administrator record` : "Older health contract";
+  return <><div className="metric-grid four"><Metric label="Database" value={health.database} detail="API connectivity check" icon={HardDrives} /><Metric label="Recorded jobs" value={String(jobTotal)} detail="Across persisted states" icon={ListChecks} /><Metric label="Job states" value={String(Object.keys(health.jobs).length)} detail={`Checked ${formatDate(health.checked_at)}`} icon={SlidersHorizontal} /><Metric label="Canonical admin" value={canonicalLabel} detail={canonicalDetail} icon={UsersThree} /></div><section className="card admin-table-section"><div className="section-heading"><div><p className="eyebrow">PostgreSQL queue</p><h2>Jobs by state</h2></div></div>{Object.keys(health.jobs).length ? <dl className="version-list">{Object.entries(health.jobs).sort().map(([state, count]) => <div key={state}><dt>{state.replaceAll("_", " ")}</dt><dd>{count}</dd></div>)}</dl> : <p className="muted-copy">No persisted scan jobs were reported.</p>}<div className={`alert ${canonicalStatus === "MISSING" ? "alert-danger" : "alert-info"}`}><Info aria-hidden /><span><strong>Canonical administrator: {canonicalLabel}.</strong>{canonicalStatus === "MISSING" ? "Bootstrap an administrator before relying on in-app governance." : canonicalStatus === "CONFIGURED" ? "The protected bootstrap identity is present." : "Upgrade the backend to expose the canonical administrator check."}</span></div></section></>;
 }
 
 function AdminUsers({ runSensitive }: { runSensitive: SensitiveActionRunner }) {
+  const session = useSession();
   const [users, setUsers] = useState<AdminUser[] | null>(null);
   const [error, setError] = useState("");
   function load() { setUsers(null); setError(""); api.listAdminUsers().then(setUsers).catch((reason) => setError(apiMessage(reason, "Users could not be loaded."))); }
@@ -1016,17 +1159,50 @@ function AdminUsers({ runSensitive }: { runSensitive: SensitiveActionRunner }) {
   if (!users && !error) return <div className="skeleton skeleton-panel" aria-label="Loading users" />;
   if (error) return <WorkspaceFailure message={error} retry={load} />;
   if (!users?.length) return <WorkspaceEmpty title="No users" detail="No application user accounts were returned." />;
-  return <section className="card admin-table-section"><div className="section-heading"><div><h2>Users and roles</h2><p>Identity is represented by opaque application IDs; email addresses are not exposed here.</p></div></div><div className="governance-list">{users.map((user) => <AdminUserRow key={user.id} user={user} runSensitive={runSensitive} update={(next) => setUsers((current) => current?.map((item) => item.id === next.id ? { ...item, ...next } : item) ?? null)} />)}</div></section>;
+  return <section className="card admin-table-section"><div className="section-heading"><div><h2>Users and roles</h2><p>Identity is represented by opaque application IDs; email addresses are not exposed here.</p></div></div><div className="governance-list">{users.map((user) => <AdminUserRow key={user.id} user={user} canManageAdministrators={Boolean(session.me?.is_canonical_admin)} runSensitive={runSensitive} update={(next) => setUsers((current) => current?.map((item) => item.id === next.id ? { ...item, ...next } : item) ?? null)} />)}</div></section>;
 }
 
-function AdminUserRow({ user, update, runSensitive }: { user: AdminUser; update: (value: Pick<AdminUser, "id" | "role" | "disabled">) => void; runSensitive: SensitiveActionRunner }) {
-  const editable = user.role !== "ADMINISTRATOR";
-  const [role, setRole] = useState<AssignableRole>(user.role === "ADMINISTRATOR" ? "REGISTERED_USER" : user.role);
+function AdminUserRow({ user, update, runSensitive, canManageAdministrators }: { user: AdminUser; update: (value: Pick<AdminUser, "id" | "role" | "disabled">) => void; runSensitive: SensitiveActionRunner; canManageAdministrators: boolean }) {
+  const editable = !user.is_canonical_admin && (user.role !== "ADMINISTRATOR" || canManageAdministrators);
+  const [role, setRole] = useState<AssignableRole>(user.role);
   const [disabled, setDisabled] = useState(user.disabled);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   async function save() { setBusy(true); setError(""); try { await runSensitive(async () => { const result = await api.updateAdminUser(user.id, role, disabled); update(result); }); } catch (reason) { setError(apiMessage(reason, "The user could not be updated.")); } finally { setBusy(false); } }
-  return <article className="governance-row"><div><strong className="mono">{user.id}</strong><small>Created {formatDate(user.created_at)} · email {user.email_verified ? "verified" : "not verified"} · MFA {user.mfa_verified ? "verified" : "not verified"}</small></div>{editable ? <><label><span className="sr-only">Role for {user.id}</span><select value={role} onChange={(event) => setRole(event.target.value as AssignableRole)}><option value="REGISTERED_USER">Registered user</option><option value="ANALYST">Analyst</option><option value="RESEARCHER">Researcher</option></select></label><label className="checkbox-row compact-checkbox"><input type="checkbox" checked={disabled} onChange={(event) => setDisabled(event.target.checked)} /> Disabled</label><button className="button button-secondary button-small" type="button" disabled={busy} onClick={save}>{busy ? "Saving…" : "Save"}</button></> : <><span className="badge badge-neutral">Administrator</span><small>Bootstrap-managed</small></>}{error && <div className="alert alert-danger row-alert" role="alert"><WarningCircle aria-hidden />{error}</div>}</article>;
+  return <article className="governance-row"><div><strong className="mono">{user.id}</strong><small>Created {formatDate(user.created_at)} · email {user.email_verified ? "verified" : "not verified"} · MFA {user.mfa_verified ? "verified" : "not verified"}</small>{user.role_request?.state === "PENDING" && <small>Pending request: {roleLabel(user.role_request.requested_role)}</small>}</div>{editable ? <><label><span className="sr-only">Role for {user.id}</span><select value={role} onChange={(event) => setRole(event.target.value as AssignableRole)}><option value="REGISTERED_USER">Registered user</option><option value="ANALYST">Analyst</option><option value="RESEARCHER">Researcher</option><option value="ADMINISTRATOR">Administrator</option></select></label><label className="checkbox-row compact-checkbox"><input type="checkbox" checked={disabled} onChange={(event) => setDisabled(event.target.checked)} /> Disabled</label><button className="button button-secondary button-small" type="button" disabled={busy} onClick={save}>{busy ? "Saving…" : "Save"}</button></> : <><span className="badge badge-neutral">{user.is_canonical_admin ? "Canonical administrator" : "Administrator"}</span><small>{user.is_canonical_admin ? "Immutable in application UI" : "Canonical administrator approval required"}</small></>}{error && <div className="alert alert-danger row-alert" role="alert"><WarningCircle aria-hidden />{error}</div>}</article>;
+}
+
+function AdminRoleRequests({ runSensitive }: { runSensitive: SensitiveActionRunner }) {
+  const [requests, setRequests] = useState<RoleRequest[] | null>(null);
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+
+  function load() {
+    setRequests(null);
+    setError("");
+    api.listRoleRequests("PENDING").then(setRequests).catch((reason) => setError(apiMessage(reason, "Role requests could not be loaded.")));
+  }
+  useEffect(load, []);
+
+  async function decide(request: RoleRequest, action: "APPROVE" | "REJECT") {
+    setBusy(request.id);
+    setError("");
+    try {
+      await runSensitive(async () => {
+        await api.decideRoleRequest(request.id, action);
+        setRequests((current) => current?.filter((item) => item.id !== request.id) ?? null);
+      });
+    } catch (reason) {
+      setError(apiMessage(reason, "The role request could not be decided."));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  if (!requests && !error) return <div className="skeleton skeleton-panel" role="status" aria-label="Loading role requests" />;
+  if (error && !requests) return <WorkspaceFailure message={error} retry={load} />;
+  if (!requests?.length) return <WorkspaceEmpty title="No pending role requests" detail="New analyst and researcher requests will appear here." />;
+  return <section className="card admin-table-section"><div className="section-heading"><div><h2>Pending role requests</h2><p>Approval assigns the requested role. Verified email and TOTP remain mandatory for privileged sessions.</p></div></div>{error && <div className="alert alert-danger" role="alert"><WarningCircle aria-hidden />{error}</div>}<div className="governance-list">{requests.map((request) => <article className="governance-row role-request-row" key={request.id}><div><strong>{roleLabel(request.requested_role)} request</strong><small className="mono">User {request.user_id}</small><small>Requested {formatDate(request.requested_at)}</small></div><span className="badge badge-medium">Pending</span><div className="row-actions"><button className="button button-secondary button-small" type="button" disabled={busy === request.id} onClick={() => decide(request, "REJECT")}>Reject</button><button className="button button-primary button-small" type="button" disabled={busy === request.id} onClick={() => decide(request, "APPROVE")}>{busy === request.id ? "Saving…" : "Approve"}</button></div></article>)}</div></section>;
 }
 
 function AdminProviders({ runSensitive }: { runSensitive: SensitiveActionRunner }) {
@@ -1089,5 +1265,5 @@ function NotFoundPage() {
 }
 
 export function App() {
-  return <Shell><Routes><Route path="/" element={<ScanPage />} /><Route path="/scan/:id" element={<ResultPage />} /><Route path="/history" element={<HistoryPage />} /><Route path="/account" element={<ProtectedRoute roles={registeredRoles}><AccountPage /></ProtectedRoute>} /><Route path="/sign-in" element={<SignInPage />} /><Route path="/totp" element={<ProtectedRoute roles={registeredRoles}><TotpPage /></ProtectedRoute>} /><Route path="/feedback/:scanId" element={<FeedbackPage />} /><Route path="/analyst/cases" element={<ProtectedRoute roles={analystRoles}><AnalystCasesPage /></ProtectedRoute>} /><Route path="/analyst/cases/:id" element={<ProtectedRoute roles={analystRoles}><AnalystCasePage /></ProtectedRoute>} /><Route path="/admin" element={<ProtectedRoute roles={administratorRoles}><AdminPage /></ProtectedRoute>} /><Route path="/research" element={<ProtectedRoute roles={researcherRoles}><ResearchPage /></ProtectedRoute>} /><Route path="/reports/:id" element={<ResultPage shared />} /><Route path="*" element={<NotFoundPage />} /></Routes></Shell>;
+  return <SessionProvider><Shell><Routes><Route path="/" element={<ScanPage />} /><Route path="/scan/:id" element={<ResultPage />} /><Route path="/history" element={<HistoryPage />} /><Route path="/account" element={<ProtectedRoute roles={registeredRoles}><AccountPage /></ProtectedRoute>} /><Route path="/sign-in" element={<SignInPage />} /><Route path="/totp" element={<ProtectedRoute roles={registeredRoles}><TotpPage /></ProtectedRoute>} /><Route path="/feedback/:scanId" element={<FeedbackPage />} /><Route path="/analyst/cases" element={<ProtectedRoute roles={analystRoles}><AnalystCasesPage /></ProtectedRoute>} /><Route path="/analyst/cases/:id" element={<ProtectedRoute roles={analystRoles}><AnalystCasePage /></ProtectedRoute>} /><Route path="/admin" element={<ProtectedRoute roles={administratorRoles}><AdminPage /></ProtectedRoute>} /><Route path="/research" element={<ProtectedRoute roles={researcherRoles}><ResearchPage /></ProtectedRoute>} /><Route path="/reports/:id" element={<ResultPage shared />} /><Route path="*" element={<NotFoundPage />} /></Routes></Shell></SessionProvider>;
 }

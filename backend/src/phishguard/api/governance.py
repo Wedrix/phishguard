@@ -17,15 +17,21 @@ from phishguard.api.schemas import (
     ModelCreateRequest,
     PolicyCreateRequest,
     ProviderUpdateRequest,
+    RoleRequestActionRequest,
     ReviewActionRequest,
     UserUpdateRequest,
 )
 from phishguard.application.audit import append_audit
 from phishguard.application.auth import Principal, require_fresh_auth, require_role
+from phishguard.application.roles import (
+    ROLE_REQUEST_STATES,
+    RoleRequestError,
+    RoleRequestService,
+    role_request_payload,
+)
 from phishguard.application.scans import scan_is_active
 from phishguard.domain.types import Role
 from phishguard.infrastructure.models import (
-    ApplicationSession,
     AuditEvent,
     DatasetSnapshot,
     DecisionPolicy,
@@ -79,6 +85,11 @@ def _audit(
         request.state.correlation_id,
         detail,
     )
+
+
+def _role_request_api_error(exc: RoleRequestError) -> ApiError:
+    status = 404 if exc.code == "role_request_not_found" else 409
+    return ApiError(status, exc.code, str(exc))
 
 
 @router.get("/review-cases")
@@ -169,11 +180,14 @@ def review_action(
 def admin_users(db: Session = Depends(get_db), principal: Principal = Depends(require_principal)) -> dict[str, Any]:
     _role(principal, Role.ADMINISTRATOR)
     users = db.scalars(select(UserAccount).order_by(UserAccount.created_at.desc()).limit(100))
+    role_requests = RoleRequestService(db).repository
     return {
         "items": [
             {
                 "id": user.id,
                 "role": user.role,
+                "is_canonical_admin": user.is_canonical_admin,
+                "role_request": role_request_payload(role_requests.latest_for_user(user.id)),
                 "email_verified": user.email_verified,
                 "mfa_verified": user.mfa_verified,
                 "disabled": user.disabled_at is not None,
@@ -198,32 +212,156 @@ def update_user(
     operation = f"admin:user:{user_id}"
     if replay := _replay(db, principal.key, operation, key):
         return replay.response
-    row = db.get(UserAccount, user_id)
-    if not row or row.role == Role.ADMINISTRATOR.value or row.id == principal.user_id:
+    actor = db.get(UserAccount, principal.user_id)
+    row = db.scalar(select(UserAccount).where(UserAccount.id == user_id).with_for_update())
+    if not actor or not row:
         raise ApiError(404, "not_found", "User was not found")
     role = Role(body.role)
-    if role in {Role.ANALYST, Role.RESEARCHER} and not (row.email_verified and row.mfa_verified):
+    changed = row.role != body.role or (row.disabled_at is not None) != body.disabled
+    if changed and row.id == actor.id:
+        raise ApiError(409, "self_role_change_forbidden", "Administrators cannot change their own account")
+    if changed and row.is_canonical_admin:
+        raise ApiError(
+            409,
+            "canonical_admin_protected",
+            "The canonical administrator cannot be changed in the application",
+        )
+    if changed and row.role == Role.ADMINISTRATOR.value and not actor.is_canonical_admin:
+        raise ApiError(
+            403,
+            "canonical_admin_required",
+            "Only the canonical administrator may change another administrator",
+        )
+    if (
+        role == Role.ADMINISTRATOR
+        and row.role != Role.ADMINISTRATOR.value
+        and not db.scalar(
+            select(UserAccount.id).where(UserAccount.is_canonical_admin.is_(True))
+        )
+    ):
+        raise ApiError(
+            409,
+            "canonical_admin_missing",
+            "Bootstrap the canonical administrator before appointing other administrators",
+        )
+    if (
+        role == Role.ADMINISTRATOR
+        and row.role != Role.ADMINISTRATOR.value
+        and (body.disabled or row.disabled_at)
+    ):
+        raise ApiError(
+            409,
+            "administrator_must_be_active",
+            "Enable the account before assigning Administrator",
+        )
+    if (
+        not body.disabled
+        and role in {Role.ANALYST, Role.RESEARCHER, Role.ADMINISTRATOR}
+        and not (
+            row.email_verified and row.mfa_verified
+        )
+    ):
         raise ApiError(
             409,
             "privileged_assurance_required",
             "Verified email and TOTP are required before assigning a privileged role",
         )
-    changed = row.role != body.role or (row.disabled_at is not None) != body.disabled
+    previous_role = row.role
+    previously_disabled = row.disabled_at is not None
     changed_at = datetime.now(UTC)
     row.role = body.role
     if (row.disabled_at is not None) != body.disabled:
         row.disabled_at = changed_at if body.disabled else None
     if changed:
-        db.execute(
-            update(ApplicationSession)
-            .where(
-                ApplicationSession.user_id == row.id,
-                ApplicationSession.revoked_at.is_(None),
-            )
-            .values(revoked_at=changed_at)
+        RoleRequestService(db).revoke_sessions(row.id)
+    resolved_request = RoleRequestService(db).approve_matching_pending(actor, row, body.role)
+    _audit(
+        request,
+        db,
+        principal,
+        "user.update",
+        "user_account",
+        row.id,
+        {
+            "previous_role": previous_role,
+            "role": body.role,
+            "previously_disabled": previously_disabled,
+            "disabled": body.disabled,
+            "resolved_role_request_id": resolved_request.id if resolved_request else None,
+        },
+    )
+    payload = {
+        "id": row.id,
+        "role": row.role,
+        "is_canonical_admin": row.is_canonical_admin,
+        "disabled": row.disabled_at is not None,
+        "role_request": role_request_payload(
+            resolved_request or RoleRequestService(db).repository.latest_for_user(row.id)
+        ),
+    }
+    _remember(db, principal.key, operation, key, 200, payload)
+    return payload
+
+
+@router.get("/admin/role-requests")
+def admin_role_requests(
+    state: str | None = "PENDING",
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_principal),
+) -> dict[str, Any]:
+    _role(principal, Role.ADMINISTRATOR)
+    normalized = state.upper() if state else None
+    if normalized and normalized not in ROLE_REQUEST_STATES:
+        raise ApiError(422, "invalid_role_request_state", "Role request state is invalid")
+    return {
+        "items": [
+            role_request_payload(row)
+            for row in RoleRequestService(db).repository.list(normalized)
+        ]
+    }
+
+
+@router.post("/admin/role-requests/{role_request_id}/actions")
+def decide_role_request(
+    role_request_id: str,
+    body: RoleRequestActionRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(csrf_guard),
+    key: str = Depends(idempotency_key),
+) -> dict[str, Any]:
+    _role(principal, Role.ADMINISTRATOR)
+    _fresh(db, principal)
+    operation = f"admin:role_request:{role_request_id}"
+    if replay := _replay(db, principal.key, operation, key):
+        return replay.response
+    actor = db.get(UserAccount, principal.user_id)
+    if not actor:
+        raise ApiError(404, "not_found", "Administrator was not found")
+    try:
+        row, target, role_changed = RoleRequestService(db).decide(
+            actor,
+            role_request_id,
+            body.action,
+            body.note,
         )
-    _audit(request, db, principal, "user.update", "user_account", row.id, {"role": body.role, "disabled": body.disabled})
-    payload = {"id": row.id, "role": row.role, "disabled": row.disabled_at is not None}
+    except RoleRequestError as exc:
+        raise _role_request_api_error(exc) from exc
+    payload = role_request_payload(row)
+    assert payload is not None
+    _audit(
+        request,
+        db,
+        principal,
+        f"role_request.{body.action.lower()}",
+        "role_request",
+        row.id,
+        {
+            "target_user_id": target.id,
+            "requested_role": row.requested_role,
+            "role_changed": role_changed,
+        },
+    )
     _remember(db, principal.key, operation, key, 200, payload)
     return payload
 
@@ -376,7 +514,20 @@ def audit_events(db: Session = Depends(get_db), principal: Principal = Depends(r
 def admin_health(db: Session = Depends(get_db), principal: Principal = Depends(require_principal)) -> dict[str, Any]:
     _role(principal, Role.ADMINISTRATOR)
     queue = dict(db.execute(select(ScanJob.state, func.count()).group_by(ScanJob.state)).all())
-    return {"database": "available", "jobs": queue, "checked_at": datetime.now(UTC).isoformat()}
+    canonical_count = db.scalar(
+        select(func.count())
+        .select_from(UserAccount)
+        .where(UserAccount.is_canonical_admin.is_(True))
+    ) or 0
+    return {
+        "database": "available",
+        "jobs": queue,
+        "canonical_admin": {
+            "status": "CONFIGURED" if canonical_count == 1 else "MISSING",
+            "count": canonical_count,
+        },
+        "checked_at": datetime.now(UTC).isoformat(),
+    }
 
 
 @router.get("/research/datasets")

@@ -2,8 +2,8 @@ import { act, cleanup, fireEvent, render, screen, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { App, RESULT_POLL_DEADLINE_MS, resultPollDelay } from "./App";
-import { ApiError, api, type EngineMode, type Scan, type ScanStatus } from "./api";
+import { App, RESULT_POLL_DEADLINE_MS, resultPollDelay, verdictPresentation } from "./App";
+import { ApiError, api, type EngineMode, type RoleRequest, type Scan, type ScanStatus } from "./api";
 
 function renderRoute(route = "/") {
   return render(<MemoryRouter initialEntries={[route]}><App /></MemoryRouter>);
@@ -33,6 +33,19 @@ function scanFixture(status: ScanStatus = "COMPLETE", engineMode: EngineMode = "
   };
 }
 
+function roleRequestFixture(): RoleRequest {
+  return {
+    id: "role-request-001",
+    user_id: "user-1",
+    requested_role: "ANALYST",
+    state: "PENDING",
+    requested_at: "2026-07-22T10:00:00Z",
+    decided_at: null,
+    decided_by_user_id: null,
+    decision_note: null,
+  };
+}
+
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
@@ -40,6 +53,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.useRealTimers();
   localStorage.clear();
+  sessionStorage.clear();
   document.cookie = "phishguard_csrf=; max-age=0; path=/";
 });
 
@@ -60,7 +74,7 @@ describe("PhishGuard scan journey", () => {
   });
 
   it("uses the dark evidence workspace for authorised privileged routes", async () => {
-    vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, user_id: "user-1", role: "ADMINISTRATOR" });
+    vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, session_kind: "USER", user_id: "user-1", role: "ADMINISTRATOR" });
     vi.spyOn(api, "getAdminHealth").mockResolvedValue({
       database: "available",
       jobs: { QUEUED: 2, COMPLETE: 4 },
@@ -75,15 +89,85 @@ describe("PhishGuard scan journey", () => {
   });
 
   it("does not render privileged content for an unauthorised role", async () => {
-    vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, user_id: "user-1", role: "REGISTERED_USER" });
+    vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, session_kind: "USER", user_id: "user-1", role: "REGISTERED_USER" });
     renderRoute("/admin");
-    expect(await screen.findByRole("heading", { name: /sign in required/i })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: /access restricted/i })).toBeVisible();
     expect(screen.queryByRole("heading", { name: /control centre/i })).not.toBeInTheDocument();
+  });
+
+  it("shows session-aware public navigation for anonymous, guest, and user sessions", async () => {
+    const me = vi.spyOn(api, "me")
+      .mockResolvedValueOnce({ authenticated: false, session_kind: "ANONYMOUS", user_id: null, role: null })
+      .mockResolvedValueOnce({ authenticated: false, session_kind: "GUEST", user_id: null, role: null })
+      .mockResolvedValueOnce({ authenticated: true, session_kind: "USER", user_id: "analyst-1", role: "ANALYST" });
+
+    renderRoute();
+    expect(await screen.findByRole("link", { name: /^sign in$/i })).toBeVisible();
+    expect(screen.queryByRole("link", { name: /^history$/i })).not.toBeInTheDocument();
+    cleanup();
+
+    renderRoute();
+    expect(await screen.findByRole("link", { name: /^history$/i })).toBeVisible();
+    expect(screen.queryByRole("link", { name: /^account$/i })).not.toBeInTheDocument();
+    cleanup();
+
+    renderRoute();
+    expect((await screen.findAllByRole("link", { name: /^account/i })).some((link) => link.classList.contains("user-chip"))).toBe(true);
+    expect(screen.getByRole("link", { name: /open workspace/i })).toHaveAttribute("href", "/analyst/cases");
+    expect(screen.getByRole("button", { name: /^sign out$/i })).toBeVisible();
+    expect(me).toHaveBeenCalledTimes(3);
+  });
+
+  it("preserves a validated internal destination when authentication is required", async () => {
+    vi.spyOn(api, "me").mockResolvedValue({ authenticated: false, session_kind: "ANONYMOUS", user_id: null, role: null });
+    renderRoute("/admin?section=users");
+
+    const link = (await screen.findAllByRole("link", { name: /^sign in$/i })).find((item) => item.getAttribute("href")?.includes("from="));
+    expect(link).toBeDefined();
+    expect(link).toHaveAttribute("href", "/sign-in?from=%2Fadmin%3Fsection%3Dusers");
+  });
+
+  it("filters workspace navigation by role", async () => {
+    vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, session_kind: "USER", user_id: "analyst-1", role: "ANALYST" });
+    vi.spyOn(api, "listReviewCases").mockResolvedValue([]);
+    renderRoute("/analyst/cases");
+
+    expect(await screen.findByRole("heading", { name: /review cases/i })).toBeVisible();
+    expect(screen.getByRole("link", { name: /^cases$/i })).toBeVisible();
+    expect(screen.queryByRole("link", { name: /administration/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /^research$/i })).not.toBeInTheDocument();
+  });
+
+  it("moves focus to main content only when the pathname changes", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, "me").mockResolvedValue({ authenticated: false, session_kind: "GUEST", user_id: null, role: null });
+    vi.spyOn(api, "listScans").mockResolvedValue([]);
+    renderRoute();
+
+    const main = document.getElementById("main-content");
+    expect(document.activeElement).not.toBe(main);
+    await user.click(await screen.findByRole("link", { name: /^history$/i }));
+    await screen.findByRole("heading", { name: /scan history/i });
+    expect(document.activeElement).toBe(main);
+  });
+
+  it("clears the local session and leaves the protected route when sign-out revocation fails", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, session_kind: "USER", user_id: "analyst-1", role: "ANALYST" });
+    vi.spyOn(api, "listReviewCases").mockResolvedValue([]);
+    vi.spyOn(api, "endSession").mockRejectedValue(new ApiError(503, "Unavailable", "api_unavailable"));
+    renderRoute("/analyst/cases");
+
+    await screen.findByRole("heading", { name: /review cases/i });
+    await user.click(screen.getByRole("button", { name: /^sign out$/i }));
+
+    expect(await screen.findByRole("heading", { name: /sign in to phishguard/i })).toBeVisible();
+    expect(screen.getByText(/signed out locally/i)).toBeVisible();
   });
 
   it("distinguishes model deployment approval from runtime activation", async () => {
     const user = userEvent.setup();
-    vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, user_id: "admin-1", role: "ADMINISTRATOR" });
+    vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, session_kind: "USER", user_id: "admin-1", role: "ADMINISTRATOR" });
     vi.spyOn(api, "getAdminHealth").mockResolvedValue({ database: "available", jobs: {}, checked_at: "2026-07-22T10:00:00Z" });
     vi.spyOn(api, "listDecisionPolicies").mockResolvedValue([]);
     vi.spyOn(api, "listModels").mockResolvedValue([{
@@ -98,11 +182,45 @@ describe("PhishGuard scan journey", () => {
 
     renderRoute("/admin");
     await screen.findByRole("heading", { name: /control centre/i });
-    await user.click(screen.getByRole("tab", { name: /policies & models/i }));
+    await user.click(screen.getByRole("button", { name: /policies & models/i }));
 
     expect(await screen.findByText("Approved for deployment")).toBeVisible();
     expect(screen.getByText(/approval is not runtime activation/i)).toBeVisible();
     expect(screen.queryByText(/^Runtime active$/i)).not.toBeInTheDocument();
+  });
+
+  it("shows canonical-administrator health and protects the canonical user row", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, session_kind: "USER", user_id: "admin-1", role: "ADMINISTRATOR", is_canonical_admin: true });
+    vi.spyOn(api, "getAdminHealth").mockResolvedValue({ database: "available", jobs: {}, canonical_admin: { status: "CONFIGURED", count: 1 }, checked_at: "2026-07-22T10:00:00Z" });
+    vi.spyOn(api, "listAdminUsers").mockResolvedValue([
+      { id: "admin-1", role: "ADMINISTRATOR", is_canonical_admin: true, email_verified: true, mfa_verified: true, disabled: false, created_at: "2026-07-22T10:00:00Z" },
+      { id: "admin-2", role: "ADMINISTRATOR", is_canonical_admin: false, email_verified: true, mfa_verified: true, disabled: false, created_at: "2026-07-22T10:00:00Z" },
+    ]);
+    renderRoute("/admin");
+
+    expect(await screen.findByText("Configured", { selector: ".metric-card strong" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: /^users$/i }));
+    expect(await screen.findByText(/immutable in application ui/i)).toBeVisible();
+    expect(screen.queryByLabelText("Role for admin-1")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Role for admin-2")).toBeVisible();
+  });
+
+  it("approves pending role requests with the governed upper-case action", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, session_kind: "USER", user_id: "admin-1", role: "ADMINISTRATOR", is_canonical_admin: true });
+    vi.spyOn(api, "getAdminHealth").mockResolvedValue({ database: "available", jobs: {}, canonical_admin: { status: "CONFIGURED", count: 1 }, checked_at: "2026-07-22T10:00:00Z" });
+    const request = roleRequestFixture();
+    vi.spyOn(api, "listRoleRequests").mockResolvedValue([request]);
+    const decide = vi.spyOn(api, "decideRoleRequest").mockResolvedValue({ ...request, state: "APPROVED", decided_at: "2026-07-22T10:05:00Z", decided_by_user_id: "admin-1" });
+    renderRoute("/admin");
+
+    await screen.findByRole("heading", { name: /control centre/i });
+    await user.click(screen.getByRole("button", { name: /role requests/i }));
+    expect(await screen.findByText(/analyst request/i)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: /^approve$/i }));
+    expect(decide).toHaveBeenCalledWith(request.id, "APPROVE");
+    expect(await screen.findByRole("heading", { name: /no pending role requests/i })).toBeVisible();
   });
 
   it("falls back to local demo analysis without retaining a query string", async () => {
@@ -150,6 +268,30 @@ describe("PhishGuard scan journey", () => {
     expect(screen.getByText("Rule-only fallback").closest(".result-badges")).toBeTruthy();
   });
 
+  it("uses the approved risk headlines for every verdict", () => {
+    expect(verdictPresentation("HIGH").title).toBe("Avoid this link.");
+    expect(verdictPresentation("MEDIUM").title).toBe("Use caution with this link.");
+    expect(verdictPresentation("LOW").title).toBe("No strong phishing indicators found.");
+    expect(verdictPresentation("INCONCLUSIVE").title).toBe("Treat this link as unverified.");
+  });
+
+  it("makes provisional, partial, and empty-evidence states explicit", async () => {
+    const processing = scanFixture("PROCESSING");
+    processing.decision.risk_band = "INCONCLUSIVE";
+    processing.decision.reasons = [];
+    processing.decision.evidence = [];
+    vi.spyOn(api, "getScanUpdate").mockResolvedValue({ scan: processing, poll_after_ms: 10_000 });
+    renderRoute("/scan/scan-real-001");
+
+    expect(await screen.findByRole("heading", { name: "Treat this link as unverified." })).toBeVisible();
+    expect(screen.getByText(/external checks are still running; risk may increase/i)).toBeVisible();
+    expect(screen.getByText(/some checks were unavailable\. missing evidence did not lower the risk/i)).toBeVisible();
+    expect(screen.getByText(/no specific risk reasons were recorded/i)).toBeVisible();
+    fireEvent.click(screen.getByText("Evidence"));
+    expect(screen.getByText(/no evidence observations were stored/i)).toBeVisible();
+    expect(screen.getByText(/treat this link as unverified/i, { selector: ".next-actions strong" })).toBeVisible();
+  });
+
   it("honours the polling interval, pauses after refresh failure, and retries manually", async () => {
     vi.useFakeTimers();
     const processing = scanFixture("PROCESSING");
@@ -176,6 +318,22 @@ describe("PhishGuard scan journey", () => {
     expect(screen.getByText("Complete", { selector: ".status-complete" })).toBeVisible();
   });
 
+  it("announces exactly one processing-to-final transition atomically", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(api, "getScanUpdate")
+      .mockResolvedValueOnce({ scan: scanFixture("PROCESSING"), poll_after_ms: 250 })
+      .mockResolvedValueOnce({ scan: scanFixture("COMPLETE") });
+    const { container } = renderRoute("/scan/scan-real-001");
+    await act(async () => { await Promise.resolve(); });
+
+    const liveRegions = container.querySelectorAll('[aria-live="polite"]');
+    expect(liveRegions).toHaveLength(1);
+    expect(liveRegions[0]).toHaveTextContent("");
+    await act(async () => { await vi.advanceTimersByTimeAsync(250); });
+    expect(liveRegions[0]).toHaveAttribute("aria-atomic", "true");
+    expect(liveRegions[0]).toHaveTextContent("Analysis complete. Medium risk. Complete evidence coverage.");
+  });
+
   it("stops automatic result polling at the two-minute processing deadline", async () => {
     vi.useFakeTimers();
     const getUpdate = vi.spyOn(api, "getScanUpdate").mockResolvedValue({
@@ -192,6 +350,19 @@ describe("PhishGuard scan journey", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
     expect(getUpdate).toHaveBeenCalledTimes(callsAtDeadline);
     expect(screen.getByRole("button", { name: /check again/i })).toBeVisible();
+  });
+
+  it("offers governed role intent during registration without offering administrator", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, "me").mockResolvedValue({ authenticated: false, session_kind: "ANONYMOUS", user_id: null, role: null });
+    renderRoute("/sign-in");
+
+    await user.click(await screen.findByRole("button", { name: /create an account/i }));
+    const roles = screen.getByLabelText(/intended account role/i);
+    expect(within(roles).getByRole("option", { name: /^registered user$/i })).toBeVisible();
+    expect(within(roles).getByRole("option", { name: /analyst.*approval required/i })).toBeVisible();
+    expect(within(roles).getByRole("option", { name: /researcher.*approval required/i })).toBeVisible();
+    expect(within(roles).queryByRole("option", { name: /administrator/i })).not.toBeInTheDocument();
   });
 
   it("confirms history deletion, preserves failures, and announces success", async () => {
@@ -219,10 +390,23 @@ describe("PhishGuard scan journey", () => {
     expect(screen.queryByRole("link", { name: scan.display_url })).not.toBeInTheDocument();
   });
 
+  it("keeps history error and empty states mutually exclusive and supports retry", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, "listScans").mockRejectedValueOnce(new ApiError(503, "Unavailable")).mockResolvedValueOnce([]);
+    renderRoute("/history");
+
+    expect(await screen.findByRole("heading", { name: /history unavailable/i })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: /no saved scans/i })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /try again/i }));
+    expect(await screen.findByRole("heading", { name: /no saved scans/i })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: /history unavailable/i })).not.toBeInTheDocument();
+  });
+
   it("updates retention and downloads the redacted account export", async () => {
     const user = userEvent.setup();
     vi.spyOn(api, "me").mockResolvedValue({
       authenticated: true,
+      session_kind: "USER",
       user_id: "user-1",
       role: "REGISTERED_USER",
       scan_retention_days: 30,
@@ -255,10 +439,37 @@ describe("PhishGuard scan journey", () => {
     expect(URL.createObjectURL).toHaveBeenCalled();
   });
 
+  it("creates and cancels a governed workspace role request from the account page", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, "me").mockResolvedValue({
+      authenticated: true,
+      session_kind: "USER",
+      user_id: "user-1",
+      role: "REGISTERED_USER",
+      role_request: null,
+      scan_retention_days: 30,
+      scan_retention_max_days: 30,
+    });
+    const request = roleRequestFixture();
+    const create = vi.spyOn(api, "createRoleRequest").mockResolvedValue(request);
+    const cancel = vi.spyOn(api, "cancelRoleRequest").mockResolvedValue();
+    renderRoute("/account");
+
+    await screen.findByRole("heading", { name: /workspace access/i });
+    await user.click(screen.getByRole("button", { name: /request access/i }));
+    expect(create).toHaveBeenCalledWith("ANALYST");
+    expect(await screen.findByText(/analyst access pending/i)).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: /cancel request/i }));
+    expect(cancel).toHaveBeenCalledWith(request.id);
+    expect(await screen.findByRole("status")).toHaveTextContent(/pending role request was cancelled/i);
+  });
+
   it("confirms account-wide scan deletion and explains the identity boundary", async () => {
     const user = userEvent.setup();
     vi.spyOn(api, "me").mockResolvedValue({
       authenticated: true,
+      session_kind: "USER",
       user_id: "user-1",
       role: "REGISTERED_USER",
       scan_retention_days: 30,
@@ -308,6 +519,28 @@ describe("PhishGuard scan journey", () => {
     expect(new Headers((fetchMock.mock.calls[2][1] as RequestInit).headers).get("Idempotency-Key")).toBeTruthy();
   });
 
+  it("uses the plural role-request contract and retains structured API error details", async () => {
+    document.cookie = "phishguard_csrf=role-csrf; path=/";
+    const request = roleRequestFixture();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(request), { status: 201, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: "role_request_pending", message: "A request is already pending.", correlation_id: "correlation-1", fields: { requested_role: "ANALYST" } } }), { status: 409, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.createRoleRequest("ANALYST");
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/v1/account/role-requests");
+    expect(init.body).toBe(JSON.stringify({ requested_role: "ANALYST" }));
+    expect(new Headers(init.headers).get("Idempotency-Key")).toBeTruthy();
+    expect(new Headers(init.headers).get("X-CSRF-Token")).toBe("role-csrf");
+
+    const failure = await api.createRoleRequest("ANALYST").catch((reason: unknown) => reason);
+    expect(failure).toBeInstanceOf(ApiError);
+    if (!(failure instanceof ApiError)) throw new Error("Expected ApiError");
+    expect(failure.correlationId).toBe("correlation-1");
+    expect(failure.fields).toEqual({ requested_role: "ANALYST" });
+  });
+
   it("sends JSON, idempotency and CSRF headers to the scan API", async () => {
     document.cookie = "phishguard_csrf=test-csrf; path=/";
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
@@ -348,8 +581,22 @@ describe("PhishGuard scan journey", () => {
     expect(JSON.stringify(report)).not.toContain("private");
   });
 
+  it("prevents duplicate feedback submission and surfaces API failure", async () => {
+    const user = userEvent.setup();
+    let rejectSubmission: (reason: unknown) => void = () => undefined;
+    vi.spyOn(api, "submitFeedback").mockImplementation(() => new Promise<void>((_resolve, reject) => { rejectSubmission = reject; }));
+    renderRoute("/feedback/scan-real-001");
+
+    await user.click(screen.getByRole("radio", { name: /more dangerous/i }));
+    await user.click(screen.getByRole("button", { name: /submit feedback/i }));
+    expect(screen.getByRole("button", { name: /submitting/i })).toBeDisabled();
+    await act(async () => { rejectSubmission(new ApiError(503, "Feedback service unavailable")); });
+    expect(await screen.findByRole("alert")).toHaveTextContent(/feedback service unavailable/i);
+    expect(screen.getByRole("button", { name: /submit feedback/i })).toBeEnabled();
+  });
+
   it("renders analyst cases returned by the API without placeholder targets", async () => {
-    vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, user_id: "analyst-1", role: "ANALYST" });
+    vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, session_kind: "USER", user_id: "analyst-1", role: "ANALYST" });
     vi.spyOn(api, "listReviewCases").mockResolvedValue([{
       id: "case-real-001",
       scan_id: "scan-real-001",
@@ -367,7 +614,7 @@ describe("PhishGuard scan journey", () => {
   });
 
   it("shows quarantined feedback content in the analyst review workspace", async () => {
-    vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, user_id: "analyst-1", role: "ANALYST" });
+    vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, session_kind: "USER", user_id: "analyst-1", role: "ANALYST" });
     vi.spyOn(api, "getReviewCase").mockResolvedValue({
       id: "case-real-001",
       scan_id: "scan-real-001",
@@ -395,7 +642,7 @@ describe("PhishGuard scan journey", () => {
   });
 
   it("shows real research registry records and marks unsupported execution unavailable", async () => {
-    vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, user_id: "researcher-1", role: "RESEARCHER" });
+    vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, session_kind: "USER", user_id: "researcher-1", role: "RESEARCHER" });
     vi.spyOn(api, "listDatasets").mockResolvedValue([{
       id: "dataset-real-001",
       name: "OpenPhish temporal snapshot",
@@ -439,7 +686,7 @@ describe("PhishGuard scan journey", () => {
 
   it("opens fresh verification before retrying a protected admin change", async () => {
     const user = userEvent.setup();
-    vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, user_id: "admin-1", role: "ADMINISTRATOR" });
+    vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, session_kind: "USER", user_id: "admin-1", role: "ADMINISTRATOR" });
     vi.spyOn(api, "getAdminHealth").mockResolvedValue({ database: "available", jobs: {}, checked_at: "2026-07-22T10:00:00Z" });
     vi.spyOn(api, "listAdminUsers").mockResolvedValue([{
       id: "user-real-001",
@@ -453,7 +700,7 @@ describe("PhishGuard scan journey", () => {
 
     renderRoute("/admin");
     await screen.findByRole("heading", { name: /control centre/i });
-    await user.click(screen.getByRole("tab", { name: /users/i }));
+    await user.click(screen.getByRole("button", { name: /users/i }));
     await screen.findByText("user-real-001");
     await user.click(screen.getByRole("button", { name: /^save$/i }));
 

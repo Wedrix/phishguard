@@ -21,9 +21,17 @@ from phishguard.api.dependencies import (
     session_cookie_name,
 )
 from phishguard.api.errors import ApiError
-from phishguard.api.schemas import FeedbackRequest, RetentionUpdateRequest, SessionRequest, ShareRequest, ScanRequest
+from phishguard.api.schemas import (
+    FeedbackRequest,
+    RetentionUpdateRequest,
+    RoleRequestCreateRequest,
+    SessionRequest,
+    ShareRequest,
+    ScanRequest,
+)
 from phishguard.application.auth import (
     Principal,
+    adopt_guest_scans,
     create_guest_session,
     create_user_session,
     token_digest,
@@ -32,7 +40,13 @@ from phishguard.application.auth import (
     require_fresh_auth,
 )
 from phishguard.application.audit import append_audit
+from phishguard.application.roles import (
+    RoleRequestError,
+    RoleRequestService,
+    role_request_payload,
+)
 from phishguard.application.scans import ScanService, scan_is_active
+from phishguard.domain.types import Role
 from phishguard.domain.url_policy import UrlPolicyError
 from phishguard.infrastructure.models import (
     AnalysisRun,
@@ -49,6 +63,13 @@ from phishguard.infrastructure.models import (
 )
 
 router = APIRouter(prefix="/api/v1")
+
+DEFAULT_ROUTES = {
+    Role.REGISTERED_USER.value: "/history",
+    Role.ANALYST.value: "/analyst/cases",
+    Role.ADMINISTRATOR.value: "/admin",
+    Role.RESEARCHER.value: "/research",
+}
 
 
 def _service(request: Request, db: Session) -> ScanService:
@@ -72,6 +93,57 @@ def _fresh_account_user(db: Session, principal: Principal) -> UserAccount:
     return user
 
 
+def _account_user(db: Session, principal: Principal) -> UserAccount:
+    if not principal.user_id:
+        raise ApiError(401, "authentication_required", "A registered account is required")
+    user = db.get(UserAccount, principal.user_id)
+    if not user:
+        raise ApiError(401, "authentication_required", "A registered account is required")
+    return user
+
+
+def _role_request_api_error(exc: RoleRequestError) -> ApiError:
+    status = 404 if exc.code == "role_request_not_found" else 409
+    return ApiError(status, exc.code, str(exc))
+
+
+def _session_payload(
+    request: Request,
+    db: Session,
+    principal: Principal | None,
+) -> dict[str, Any]:
+    maximum_retention = request.app.state.settings.scan_retention_days
+    user = db.get(UserAccount, principal.user_id) if principal and principal.user_id else None
+    if not user:
+        return {
+            "authenticated": False,
+            "session_kind": "GUEST" if principal else "ANONYMOUS",
+            "user_id": None,
+            "role": None,
+            "is_canonical_admin": False,
+            "role_request": None,
+            "scan_retention_days": None,
+            "scan_retention_max_days": maximum_retention,
+            "default_route": "/",
+        }
+    return {
+        "authenticated": True,
+        "session_kind": "USER",
+        "user_id": user.id,
+        "role": user.role,
+        "is_canonical_admin": user.is_canonical_admin,
+        "role_request": role_request_payload(
+            RoleRequestService(db).repository.latest_for_user(user.id)
+        ),
+        "scan_retention_days": min(
+            user.scan_retention_days or maximum_retention,
+            maximum_retention,
+        ),
+        "scan_retention_max_days": maximum_retention,
+        "default_route": DEFAULT_ROUTES[user.role],
+    }
+
+
 def _set_session_cookies(response: Response, request: Request, token: str, csrf: str, max_age: int) -> None:
     secure = request.app.state.settings.cookie_secure
     response.set_cookie(
@@ -93,11 +165,65 @@ def _clear_session_cookies(response: Response, request: Request) -> None:
 
 
 @router.post("/session")
-def exchange_session(body: SessionRequest, request: Request, db: Session = Depends(get_db)) -> JSONResponse:
+def exchange_session(
+    body: SessionRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    previous_principal: Principal | None = Depends(get_principal),
+) -> JSONResponse:
     settings = request.app.state.settings
     claims = verify_identity_token(body.id_token, settings.identity_project_id, settings.dev_auth_enabled)
     principal, token, csrf = create_user_session(db, claims, settings.phishguard_hmac_key.encode())
-    payload = {"user_id": principal.user_id, "role": principal.role.value if principal.role else None, "csrf_token": csrf}
+    assert principal.user_id is not None
+    user = db.get(UserAccount, principal.user_id)
+    assert user is not None
+    role_service = RoleRequestService(db)
+    role_request = role_service.repository.latest_for_user(user.id)
+    if body.requested_role in {"ANALYST", "RESEARCHER"}:
+        try:
+            role_request, created = role_service.request(user, body.requested_role)
+        except RoleRequestError:
+            # A role preference must never make an otherwise valid sign-in fail.
+            role_request = role_service.repository.latest_for_user(user.id)
+        else:
+            if created:
+                append_audit(
+                    db,
+                    settings.phishguard_hmac_key.encode(),
+                    user.id,
+                    "role_request.create",
+                    "role_request",
+                    role_request.id,
+                    "SUCCESS",
+                    request.state.correlation_id,
+                    {"requested_role": role_request.requested_role, "source": "session"},
+                )
+    adopted_scan_count = 0
+    if previous_principal and not previous_principal.user_id:
+        retention_days = min(
+            user.scan_retention_days or settings.scan_retention_days,
+            settings.scan_retention_days,
+        )
+        adopted_scan_count = adopt_guest_scans(
+            db,
+            previous_principal.session_id,
+            user.id,
+            retention_days,
+        )
+        if adopted_scan_count:
+            append_audit(
+                db,
+                settings.phishguard_hmac_key.encode(),
+                user.id,
+                "scan.guest_adopt",
+                "user_account",
+                user.id,
+                "SUCCESS",
+                request.state.correlation_id,
+                {"scan_count": adopted_scan_count},
+            )
+    payload = _session_payload(request, db, principal)
+    payload.update({"adopted_scan_count": adopted_scan_count, "csrf_token": csrf})
     response = JSONResponse(payload, status_code=201)
     _set_session_cookies(response, request, token, csrf, 8 * 60 * 60)
     return response
@@ -147,19 +273,80 @@ def end_session(
 def me(
     request: Request,
     db: Session = Depends(get_db),
-    principal: Principal = Depends(require_principal),
+    principal: Principal | None = Depends(get_principal),
 ) -> dict[str, Any]:
-    user = db.get(UserAccount, principal.user_id) if principal.user_id else None
-    return {
-        "authenticated": principal.user_id is not None,
-        "user_id": principal.user_id,
-        "role": principal.role.value if principal.role else "GUEST",
-        "scan_retention_days": min(
-            user.scan_retention_days or request.app.state.settings.scan_retention_days,
-            request.app.state.settings.scan_retention_days,
-        ) if user else None,
-        "scan_retention_max_days": request.app.state.settings.scan_retention_days,
-    }
+    return _session_payload(request, db, principal)
+
+
+@router.post("/account/role-requests")
+def create_role_request(
+    body: RoleRequestCreateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(csrf_guard),
+    key: str = Depends(idempotency_key),
+) -> JSONResponse:
+    user = _account_user(db, principal)
+    operation = "account_role_request_create"
+    if replay := _idempotent_replay(db, principal.key, operation, key):
+        return JSONResponse(replay.response, status_code=replay.status_code)
+    try:
+        row, created = RoleRequestService(db).request(user, body.requested_role)
+    except RoleRequestError as exc:
+        raise _role_request_api_error(exc) from exc
+    status = 201 if created else 200
+    payload = role_request_payload(row)
+    assert payload is not None
+    if created:
+        append_audit(
+            db,
+            request.app.state.settings.phishguard_hmac_key.encode(),
+            user.id,
+            "role_request.create",
+            "role_request",
+            row.id,
+            "SUCCESS",
+            request.state.correlation_id,
+            {"requested_role": row.requested_role, "source": "account"},
+        )
+    _store_idempotency(db, principal.key, operation, key, status, payload)
+    return JSONResponse(payload, status_code=status)
+
+
+@router.delete(
+    "/account/role-requests/{role_request_id}",
+    status_code=204,
+    response_class=Response,
+    response_model=None,
+)
+def cancel_role_request(
+    role_request_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(csrf_guard),
+    key: str = Depends(idempotency_key),
+) -> Response:
+    user = _account_user(db, principal)
+    operation = f"account_role_request_cancel:{role_request_id}"
+    if replay := _idempotent_replay(db, principal.key, operation, key):
+        return Response(status_code=replay.status_code)
+    try:
+        row = RoleRequestService(db).cancel(user, role_request_id)
+    except RoleRequestError as exc:
+        raise _role_request_api_error(exc) from exc
+    append_audit(
+        db,
+        request.app.state.settings.phishguard_hmac_key.encode(),
+        user.id,
+        "role_request.cancel",
+        "role_request",
+        row.id,
+        "SUCCESS",
+        request.state.correlation_id,
+        {"requested_role": row.requested_role},
+    )
+    _store_idempotency(db, principal.key, operation, key, 204, {})
+    return Response(status_code=204)
 
 
 @router.post("/account/export")

@@ -26,6 +26,13 @@ def test_fresh_migration_seeds_effective_web_risk_policy(tmp_path: Path) -> None
         assert provider is not None
         assert provider.enabled is True
         assert provider.config == {"requests_per_minute": 60}
-        assert "scan_retention_days" in {
-            column["name"] for column in inspect(db.get_bind()).get_columns("user_account")
+        inspector = inspect(db.get_bind())
+        user_columns = {column["name"] for column in inspector.get_columns("user_account")}
+        assert {"scan_retention_days", "is_canonical_admin"} <= user_columns
+        assert "role_request" in inspector.get_table_names()
+        assert "uq_user_account_canonical_admin" in {
+            index["name"] for index in inspector.get_indexes("user_account")
+        }
+        assert {"ix_role_request_user_id", "uq_role_request_pending_user"} <= {
+            index["name"] for index in inspector.get_indexes("role_request")
         }

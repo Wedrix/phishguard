@@ -79,14 +79,44 @@ export interface SharedReportResponse {
 }
 
 export type ApplicationRole = "REGISTERED_USER" | "ANALYST" | "ADMINISTRATOR" | "RESEARCHER";
-export type AssignableRole = Exclude<ApplicationRole, "ADMINISTRATOR">;
+export type AssignableRole = ApplicationRole;
+export type RequestedRole = Exclude<ApplicationRole, "ADMINISTRATOR">;
+export type PrivilegedRequestedRole = Extract<RequestedRole, "ANALYST" | "RESEARCHER">;
+export type RoleRequestState = "PENDING" | "APPROVED" | "REJECTED" | "CANCELLED";
+
+export interface RoleRequest {
+  id: string;
+  user_id: string;
+  requested_role: PrivilegedRequestedRole;
+  state: RoleRequestState;
+  requested_at: string;
+  decided_at: string | null;
+  decided_by_user_id: string | null;
+  decision_note: string | null;
+}
 
 export interface MeResponse {
   authenticated: boolean;
+  session_kind: "ANONYMOUS" | "GUEST" | "USER";
   user_id: string | null;
-  role: ApplicationRole | "GUEST";
+  role: ApplicationRole | null;
+  is_canonical_admin?: boolean;
+  role_request?: RoleRequest | null;
+  default_route?: string;
   scan_retention_days?: number | null;
   scan_retention_max_days?: number;
+}
+
+export interface SessionResponse {
+  authenticated: true;
+  session_kind: "USER";
+  user_id: string;
+  role: ApplicationRole;
+  is_canonical_admin?: boolean;
+  role_request?: RoleRequest | null;
+  default_route?: string;
+  csrf_token: string;
+  adopted_scan_count?: number;
 }
 
 export interface AccountExport {
@@ -132,6 +162,8 @@ export type ReviewAction =
 export interface AdminUser {
   id: string;
   role: ApplicationRole;
+  is_canonical_admin?: boolean;
+  role_request?: RoleRequest | null;
   email_verified: boolean;
   mfa_verified: boolean;
   disabled: boolean;
@@ -179,6 +211,7 @@ export interface AuditEvent {
 export interface AdminHealth {
   database: string;
   jobs: Record<string, number>;
+  canonical_admin?: { status: "CONFIGURED" | "MISSING"; count: 0 | 1 };
   checked_at: string;
 }
 
@@ -213,6 +246,8 @@ export class ApiError extends Error {
     public status: number,
     message: string,
     public code = "request_failed",
+    public correlationId?: string,
+    public fields: Record<string, unknown> = {},
   ) {
     super(message);
   }
@@ -243,6 +278,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       response.status,
       body?.error?.message ?? "The request could not be completed.",
       body?.error?.code,
+      body?.error?.correlation_id,
+      body?.error?.fields ?? {},
     );
   }
   if (response.status === 204) return undefined as T;
@@ -417,10 +454,10 @@ export const api = {
     return request("/me");
   },
 
-  async exchangeSession(idToken: string): Promise<{ user_id: string; role: string; csrf_token: string }> {
+  async exchangeSession(idToken: string, requestedRole?: RequestedRole): Promise<SessionResponse> {
     return request("/session", {
       method: "POST",
-      body: JSON.stringify({ id_token: idToken }),
+      body: JSON.stringify({ id_token: idToken, ...(requestedRole ? { requested_role: requestedRole } : {}) }),
     });
   },
 
@@ -459,6 +496,21 @@ export const api = {
     });
   },
 
+  async createRoleRequest(role: PrivilegedRequestedRole): Promise<RoleRequest> {
+    return request("/account/role-requests", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({ requested_role: role }),
+    });
+  },
+
+  async cancelRoleRequest(id: string): Promise<void> {
+    await request<void>(`/account/role-requests/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+    });
+  },
+
   async listReviewCases(): Promise<ReviewCase[]> {
     return (await request<{ items: ReviewCase[] }>("/review-cases")).items;
   },
@@ -484,6 +536,19 @@ export const api = {
       method: "PUT",
       headers: { "Idempotency-Key": crypto.randomUUID() },
       body: JSON.stringify({ role, disabled }),
+    });
+  },
+
+  async listRoleRequests(state = "PENDING"): Promise<RoleRequest[]> {
+    const query = new URLSearchParams({ state });
+    return (await request<{ items: RoleRequest[] }>(`/admin/role-requests?${query}`)).items;
+  },
+
+  async decideRoleRequest(id: string, action: "APPROVE" | "REJECT", note?: string): Promise<RoleRequest> {
+    return request(`/admin/role-requests/${encodeURIComponent(id)}/actions`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({ action, ...(note?.trim() ? { note: note.trim() } : {}) }),
     });
   },
 

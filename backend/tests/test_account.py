@@ -122,7 +122,9 @@ def test_account_scan_deletion_revokes_access_shares_jobs_idempotency_and_sessio
         }
         assert client.cookies.get("__Host-phishguard_session") is None
         assert client.cookies.get("phishguard_csrf") is None
-        assert second_session.get("/api/v1/me").status_code == 401
+        revoked = second_session.get("/api/v1/me")
+        assert revoked.status_code == 200
+        assert revoked.json()["session_kind"] == "ANONYMOUS"
 
     assert client.get("/api/v1/reports/" + shared.json()["report_id"]).status_code == 404
     with app.state.session_factory() as db:

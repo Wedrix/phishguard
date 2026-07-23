@@ -4,7 +4,20 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    JSON,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -22,16 +35,74 @@ class Base(DeclarativeBase):
 
 class UserAccount(Base):
     __tablename__ = "user_account"
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('REGISTERED_USER', 'ANALYST', 'ADMINISTRATOR', 'RESEARCHER')",
+            name="ck_user_account_role",
+        ),
+        CheckConstraint(
+            "is_canonical_admin = false OR (role = 'ADMINISTRATOR' AND disabled_at IS NULL)",
+            name="ck_user_account_canonical_active_admin",
+        ),
+        Index(
+            "uq_user_account_canonical_admin",
+            "is_canonical_admin",
+            unique=True,
+            postgresql_where=text("is_canonical_admin"),
+            sqlite_where=text("is_canonical_admin = 1"),
+        ),
+    )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     identity_subject: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     email_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     role: Mapped[str] = mapped_column(String(32), nullable=False, default="REGISTERED_USER")
     email_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     mfa_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_canonical_admin: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
     scan_retention_days: Mapped[int | None] = mapped_column(Integer)
     disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now, onupdate=now)
+
+
+class RoleRequest(Base):
+    __tablename__ = "role_request"
+    __table_args__ = (
+        CheckConstraint(
+            "requested_role IN ('ANALYST', 'RESEARCHER')",
+            name="ck_role_request_requested_role",
+        ),
+        CheckConstraint(
+            "state IN ('PENDING', 'APPROVED', 'REJECTED', 'CANCELLED')",
+            name="ck_role_request_state",
+        ),
+        Index(
+            "uq_role_request_pending_user",
+            "user_id",
+            unique=True,
+            postgresql_where=text("state = 'PENDING'"),
+            sqlite_where=text("state = 'PENDING'"),
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("user_account.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    requested_role: Mapped[str] = mapped_column(String(32), nullable=False)
+    state: Mapped[str] = mapped_column(String(24), nullable=False, default="PENDING")
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decided_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("user_account.id", ondelete="SET NULL")
+    )
+    decision_note: Mapped[str | None] = mapped_column(String(1000))
 
 
 class ApplicationSession(Base):

@@ -16,4 +16,4 @@ The initial demo deliberately runs `RULE_ONLY`; no unapproved model is fabricate
 
 ## Controlled change
 
-Provider, data, feature, model, threshold, retention, identity, or fusion changes require an SRS/RTM impact entry, ADR when architectural, threat-model review, test evidence, and rollback instructions. Preserve old immutable decisions; rescoring creates a new decision linked through `supersedes_id`.
+Provider, data, feature, model, threshold, retention, identity, authorization, or fusion changes require an SRS/RTM impact entry, a dated entry in the controlled change record, an ADR when architectural, threat/privacy review, test evidence, and rollout/rollback instructions. Preserve old immutable decisions; rescoring creates a new decision linked through `supersedes_id`.
