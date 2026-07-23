@@ -33,7 +33,7 @@ spec:
                 name: app-config
           env:
             - name: DB_IAM_USER
-              value: phishguard-jobs@PROJECT_ID.iam
+              value: phishguard-jobs@__PROJECT_ID__.iam
           resources:
             requests:
               cpu: 500m

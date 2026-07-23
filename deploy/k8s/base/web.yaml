@@ -32,7 +32,7 @@ spec:
                 name: app-config
           env:
             - name: DB_IAM_USER
-              value: phishguard-web@PROJECT_ID.iam
+              value: phishguard-web@__PROJECT_ID__.iam
           ports:
             - name: http
               containerPort: 8080

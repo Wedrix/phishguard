@@ -61,6 +61,8 @@ fi
 if ! secret_has_version phishguard-mtls-ca-cert || test "${ROTATE_MTLS:-false}" = true; then
   openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 365 \
     -subj '/CN=PhishGuard internal CA' \
+    -addext 'basicConstraints=critical,CA:TRUE' \
+    -addext 'keyUsage=critical,keyCertSign,cRLSign' \
     -keyout "$tmp_dir/ca.key" -out "$tmp_dir/ca.crt" >/dev/null 2>&1
 
   openssl req -newkey rsa:2048 -nodes -sha256 -subj '/CN=jobs' \
@@ -78,6 +80,10 @@ if ! secret_has_version phishguard-mtls-ca-cert || test "${ROTATE_MTLS:-false}" 
   openssl x509 -req -sha256 -days 180 -in "$tmp_dir/server.csr" \
     -CA "$tmp_dir/ca.crt" -CAkey "$tmp_dir/ca.key" -CAcreateserial \
     -extfile "$tmp_dir/server.ext" -out "$tmp_dir/server.crt" >/dev/null 2>&1
+
+  openssl verify -purpose sslclient -CAfile "$tmp_dir/ca.crt" "$tmp_dir/client.crt" >/dev/null
+  openssl verify -purpose sslserver -verify_hostname fetcher.phishguard-demo.svc.cluster.local \
+    -CAfile "$tmp_dir/ca.crt" "$tmp_dir/server.crt" >/dev/null
 
   for item in \
     "mtls-ca-cert:$tmp_dir/ca.crt" \

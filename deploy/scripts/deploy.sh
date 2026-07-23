@@ -116,17 +116,18 @@ kubectl -n phishguard-demo create secret generic fetcher-mtls \
 kubectl kustomize "$ROOT_DIR/deploy/k8s/overlays/${KUSTOMIZE_OVERLAY}" | sed \
   -e "s|APP_IMAGE|${APP_IMAGE}|g" \
   -e "s|FETCHER_IMAGE|${FETCHER_IMAGE}|g" \
-  -e "s|PROJECT_ID|${PROJECT_ID}|g" \
+  -e "s|__PROJECT_ID__|${PROJECT_ID}|g" \
   -e "s|PHISHGUARD_DOMAIN|${DOMAIN}|g" \
   -e "s|__CLOUD_SQL_CONNECTION_NAME__|${connection_name}|g" \
   -e "s|MODEL_BUCKET|${PROJECT_ID}-phishguard-models|g" \
   -e "s|RESEARCH_BUCKET|${PROJECT_ID}-phishguard-research|g" \
   -e "s|__KMS_KEY_NAME__|${kms_key_name}|g" >"$tmp_dir/rendered.yaml"
 
-if grep -Eq 'APP_IMAGE|FETCHER_IMAGE|PROJECT_ID|PHISHGUARD_DOMAIN|__CLOUD_SQL_CONNECTION_NAME__|MODEL_BUCKET|RESEARCH_BUCKET|__KMS_KEY_NAME__' "$tmp_dir/rendered.yaml"; then
+if grep -Eq 'APP_IMAGE|FETCHER_IMAGE|__PROJECT_ID__|PHISHGUARD_DOMAIN|__CLOUD_SQL_CONNECTION_NAME__|MODEL_BUCKET|RESEARCH_BUCKET|__KMS_KEY_NAME__' "$tmp_dir/rendered.yaml"; then
   echo "unresolved deployment placeholder" >&2
   exit 1
 fi
+grep -q "IDENTITY_PROJECT_ID: ${PROJECT_ID}" "$tmp_dir/rendered.yaml" || { echo "Identity Platform project ID is missing" >&2; exit 1; }
 grep -q 'port: 3307' "$tmp_dir/rendered.yaml" || { echo "Cloud SQL private egress rule is missing" >&2; exit 1; }
 
 kubectl -n phishguard-demo delete job migrate --ignore-not-found

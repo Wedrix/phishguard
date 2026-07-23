@@ -48,7 +48,9 @@ def test_csp_allows_only_the_identity_platform_connections_needed_by_the_spa() -
         make_engine("sqlite://"),
     )
     with TestClient(app, base_url="https://testserver") as client:
-        csp = client.get("/healthz").headers["content-security-policy"]
+        headers = client.get("/healthz").headers
+        csp = headers["content-security-policy"]
+    assert headers["referrer-policy"] == "strict-origin-when-cross-origin"
     assert "https://identitytoolkit.googleapis.com" in csp
     assert "https://securetoken.googleapis.com" in csp
     assert "frame-src 'self' https://phishguard-example.firebaseapp.com" in csp

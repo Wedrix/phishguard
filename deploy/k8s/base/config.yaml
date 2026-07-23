@@ -4,8 +4,8 @@ metadata:
   name: app-config
 data:
   ENVIRONMENT: production
-  GOOGLE_CLOUD_PROJECT: PROJECT_ID
-  IDENTITY_PROJECT_ID: PROJECT_ID
+  GOOGLE_CLOUD_PROJECT: __PROJECT_ID__
+  IDENTITY_PROJECT_ID: __PROJECT_ID__
   KMS_KEY_NAME: __KMS_KEY_NAME__
   STATIC_DIR: /app/frontend/dist
   COOKIE_SECURE: "true"
@@ -24,21 +24,21 @@ kind: ServiceAccount
 metadata:
   name: web
   annotations:
-    iam.gke.io/gcp-service-account: phishguard-web@PROJECT_ID.iam.gserviceaccount.com
+    iam.gke.io/gcp-service-account: phishguard-web@__PROJECT_ID__.iam.gserviceaccount.com
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: jobs
   annotations:
-    iam.gke.io/gcp-service-account: phishguard-jobs@PROJECT_ID.iam.gserviceaccount.com
+    iam.gke.io/gcp-service-account: phishguard-jobs@__PROJECT_ID__.iam.gserviceaccount.com
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: migrate
   annotations:
-    iam.gke.io/gcp-service-account: phishguard-migrate@PROJECT_ID.iam.gserviceaccount.com
+    iam.gke.io/gcp-service-account: phishguard-migrate@__PROJECT_ID__.iam.gserviceaccount.com
 ---
 apiVersion: v1
 kind: ServiceAccount

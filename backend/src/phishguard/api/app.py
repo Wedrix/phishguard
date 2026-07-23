@@ -73,7 +73,7 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None) -
             )
         response.headers["X-Correlation-ID"] = correlation_id
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
         if request.url.path.startswith("/api/v1/"):
             # API responses can contain scan metadata or, on the deliberate
