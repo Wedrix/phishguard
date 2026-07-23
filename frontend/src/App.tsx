@@ -156,7 +156,10 @@ function Shell({ children }: { children: ReactNode }) {
   const workspaceRoute = authenticated && session.me?.role !== "REGISTERED_USER" ? defaultRoute(session.me?.role ?? "") : undefined;
 
   useEffect(() => {
-    if (previousPath.current !== location.pathname) document.getElementById("main-content")?.focus();
+    if (previousPath.current !== location.pathname) {
+      document.getElementById("main-content")?.focus({ preventScroll: true });
+      window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+    }
     previousPath.current = location.pathname;
   }, [location.pathname]);
 
@@ -343,8 +346,8 @@ function ScanPage() {
 
   return (
     <div className="page scan-page">
-      <PageHeader eyebrow="Evidence-led link analysis" title="Check a link without opening it" description="PhishGuard examines the structure and available evidence behind a URL, then explains what matters." />
-      <div className="scan-layout">
+      <PageHeader eyebrow="Evidence-led link analysis" title="Check a link without opening it in your browser" description="PhishGuard examines the structure and available evidence behind a URL, then explains what matters." />
+      <div className={`scan-layout ${recentScans.length > 0 ? "has-recent-scans" : ""}`}>
         <form className="card scan-card" onSubmit={submit} noValidate>
           <div className="field">
             <label htmlFor="scan-url">URL to inspect</label>
@@ -352,7 +355,7 @@ function ScanPage() {
               <GlobeHemisphereWest aria-hidden />
               <input id="scan-url" type="url" inputMode="url" autoComplete="url" maxLength={4096} value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://example.com/account" required />
             </div>
-            <p className="field-hint">Include http:// or https://. We never provide a link that opens the destination.</p>
+            <p className="field-hint">Include http:// or https://. PhishGuard never provides an action that opens the destination in your browser.</p>
           </div>
 
           <fieldset className="mode-fieldset">
@@ -398,7 +401,12 @@ function ScanPage() {
 function HowItWorksPage() {
   return (
     <div className="page how-page">
-      <PageHeader eyebrow="Transparent analysis" title="Evidence first. Verdict second." description="PhishGuard separates local inspection, optional external collection, and decision-making so each result can show exactly what was—and was not—checked." />
+      <PageHeader
+        eyebrow="Transparent analysis"
+        title="Evidence first. Verdict second."
+        description="PhishGuard separates local inspection, optional external collection, and decision-making so each result can show exactly what was—and was not—checked."
+        actions={<><Link className="button button-primary" to="/"><MagnifyingGlass aria-hidden />Analyze a URL</Link><Link className="button button-secondary" to="/privacy"><LockKey aria-hidden />Privacy controls</Link></>}
+      />
       <ol className="process-grid">
         <li className="card"><span>01</span><GlobeHemisphereWest aria-hidden /><h2>Validate locally</h2><p>The URL is parsed, normalised, redacted, and checked by deterministic rules and the approved URL-only model before any URL-derived external request.</p></li>
         <li className="card"><span>02</span><LockKey aria-hidden /><h2>Ask before enrichment</h2><p>Local-only analysis ends here. DNS, RDAP, TLS, redirects, reputation, and static HTML checks require explicit consent for that scan.</p></li>
@@ -411,8 +419,7 @@ function HowItWorksPage() {
         <article className="card"><p className="eyebrow">Default</p><h2>Local-only</h2><ul className="plain-list"><li>No destination, DNS, RDAP, or reputation request</li><li>URL structure, rules, and URL-only model</li><li>Fastest and most private analysis scope</li></ul></article>
         <article className="card"><p className="eyebrow">With per-scan consent</p><h2>Enriched</h2><ul className="plain-list"><li>Isolated destination and infrastructure checks</li><li>Google Web Risk lookup under provider policy</li><li>Missing checks stay explicit and neutral</li></ul></article>
       </section>
-      <div className="alert alert-warning how-limit"><WarningCircle aria-hidden /><span><strong>What PhishGuard cannot promise.</strong>Automated evidence can be incomplete, stale, or adversarially manipulated. A low-risk result is not proof of safety, and the application never offers to open the submitted URL.</span></div>
-      <div className="page-actions how-actions"><Link className="button button-primary" to="/"><MagnifyingGlass aria-hidden />Analyze a URL</Link><Link className="button button-secondary" to="/privacy"><LockKey aria-hidden />Review privacy controls</Link></div>
+      <div className="alert alert-warning how-limit"><WarningCircle aria-hidden /><span><strong>What PhishGuard cannot promise.</strong>Automated evidence can be incomplete, stale, or adversarially manipulated. A low-risk result is not proof of safety, and PhishGuard never offers to open the submitted URL in your browser.</span></div>
     </div>
   );
 }
@@ -424,8 +431,8 @@ function PrivacyPage() {
     <div className="page privacy-page">
       <PageHeader
         eyebrow="Privacy and data use"
-        title="You choose what leaves your browser session"
-        description="PhishGuard starts with local URL analysis and makes external checks only when you explicitly request enriched evidence."
+        title="You choose when external checks happen"
+        description="Every scan starts with local-only analysis inside PhishGuard. Destination, infrastructure, reputation, and bounded HTML checks happen only after explicit per-scan consent."
       />
       <section className="privacy-hero card" aria-labelledby="privacy-default-title">
         <div className="privacy-hero-icon"><LockKey aria-hidden weight="fill" /></div>
@@ -438,7 +445,7 @@ function PrivacyPage() {
         <article className="card privacy-card">
           <Fingerprint aria-hidden />
           <h2>Enrichment requires consent</h2>
-          <p>For each enriched scan, PhishGuard asks first. The isolated fetcher may contact the destination and registration services, and the full URL may be sent to Google Web Risk.</p>
+          <p>With consent, an isolated fetcher may contact the destination and inspect bounded static HTML for forms, links, and credential fields. It does not run JavaScript, load subresources, send credentials, or retain raw page content. The full URL may also be sent to Google Web Risk.</p>
         </article>
         <article className="card privacy-card">
           <Database aria-hidden />
@@ -466,7 +473,7 @@ function PrivacyPage() {
           <Link className="button button-secondary" to="/">Return to scanner</Link>
         </div>
       </section>
-      <div className="alert alert-info privacy-caveat"><Info aria-hidden /><span><strong>Automated analysis has limits.</strong>PhishGuard never opens the submitted URL for you and no result is a guarantee of safety.</span></div>
+      <div className="alert alert-info privacy-caveat"><Info aria-hidden /><span><strong>Browser safety and retrieval are separate.</strong>PhishGuard never navigates your browser to the submitted URL. With your consent, enriched analysis may contact the destination through the isolated fetcher. No result is a guarantee of safety.</span></div>
     </div>
   );
 }

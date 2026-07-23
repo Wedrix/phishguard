@@ -137,8 +137,10 @@ describe("PhishGuard scan journey", () => {
     vi.spyOn(api, "me").mockResolvedValue({ authenticated: false, session_kind: "GUEST", user_id: null, role: null });
     renderRoute("/privacy");
 
-    expect(await screen.findByRole("heading", { name: /you choose what leaves your browser session/i })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: /you choose when external checks happen/i })).toBeVisible();
     expect(screen.getByRole("heading", { name: /local-only is the default/i })).toBeVisible();
+    expect(screen.getByText(/inspect bounded static html/i)).toBeVisible();
+    expect(screen.getByText(/never navigates your browser/i)).toBeVisible();
     expect(screen.getByText(/guest scans expire after one hour/i)).toBeVisible();
     expect(screen.getByRole("link", { name: /review guest history/i })).toHaveAttribute("href", "/history");
   });
@@ -175,6 +177,7 @@ describe("PhishGuard scan journey", () => {
 
   it("moves focus to main content only when the pathname changes", async () => {
     const user = userEvent.setup();
+    const scrollTo = vi.spyOn(window, "scrollTo").mockImplementation(() => undefined);
     vi.spyOn(api, "me").mockResolvedValue({ authenticated: false, session_kind: "GUEST", user_id: null, role: null });
     vi.spyOn(api, "listScans").mockResolvedValue([]);
     renderRoute();
@@ -184,6 +187,7 @@ describe("PhishGuard scan journey", () => {
     await user.click(await screen.findByRole("link", { name: /^history$/i }));
     await screen.findByRole("heading", { name: /scan history/i });
     expect(document.activeElement).toBe(main);
+    expect(scrollTo).toHaveBeenCalledWith({ top: 0, left: 0, behavior: "auto" });
   });
 
   it("clears the local session and leaves the protected route when sign-out revocation fails", async () => {
