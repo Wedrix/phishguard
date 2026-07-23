@@ -226,6 +226,7 @@ class Feedback(Base):
     author_user_id: Mapped[str | None] = mapped_column(ForeignKey("user_account.id", ondelete="SET NULL"))
     category: Mapped[str] = mapped_column(String(32), nullable=False)
     comment: Mapped[str | None] = mapped_column(String(1000))
+    research_consent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="QUARANTINED")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=now)
 

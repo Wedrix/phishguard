@@ -159,7 +159,11 @@ def test_review_case_exposes_quarantined_feedback_and_updates_it_on_adjudication
     submitted = client.post(
         f"/api/v1/scans/{scan_id}/feedback",
         headers={**headers, "Idempotency-Key": "review-feedback-submit"},
-        json={"category": "FALSE_NEGATIVE", "comment": "Credential form was missed"},
+        json={
+            "category": "FALSE_NEGATIVE",
+            "comment": "Credential form was missed",
+            "research_consent": True,
+        },
     )
     assert submitted.status_code == 201
     with app.state.session_factory() as db:
@@ -174,13 +178,37 @@ def test_review_case_exposes_quarantined_feedback_and_updates_it_on_adjudication
         "category": "FALSE_NEGATIVE",
         "comment": "Credential form was missed",
         "status": "QUARANTINED",
+        "research_consent": True,
         "created_at": detail.json()["feedback"]["created_at"],
     }
 
+    claimed = client.post(
+        f"/api/v1/review-cases/{case_id}/actions",
+        headers={**headers, "Idempotency-Key": "review-feedback-claim"},
+        json={"action": "claim"},
+    )
+    assert claimed.status_code == 200
+    invalid_citation = client.post(
+        f"/api/v1/review-cases/{case_id}/actions",
+        headers={**headers, "Idempotency-Key": "review-feedback-invalid-citation"},
+        json={
+            "action": "adjudicate",
+            "outcome": "MALICIOUS",
+            "note": "This rationale deliberately cites evidence from another case.",
+            "evidence_ids": ["reason:999"],
+        },
+    )
+    assert invalid_citation.status_code == 422
+    assert invalid_citation.json()["error"]["code"] == "invalid_evidence_reference"
     adjudicated = client.post(
         f"/api/v1/review-cases/{case_id}/actions",
         headers={**headers, "Idempotency-Key": "review-feedback-adjudicate"},
-        json={"action": "adjudicate", "outcome": "MALICIOUS"},
+        json={
+            "action": "adjudicate",
+            "outcome": "MALICIOUS",
+            "note": "The stored decision reason and submitted report support this conclusion.",
+            "evidence_ids": ["reason:0"],
+        },
     )
     assert adjudicated.status_code == 200
     repeated = client.post(
@@ -193,3 +221,80 @@ def test_review_case_exposes_quarantined_feedback_and_updates_it_on_adjudication
     with app.state.session_factory() as db:
         feedback = db.get(Feedback, submitted.json()["id"])
         assert feedback is not None and feedback.status == "REVIEWED_MALICIOUS"
+
+
+def test_model_deployment_gates_and_audit_chain_verification(client, app) -> None:
+    headers = _administrator(client, app)
+    rejected = client.post(
+        "/api/v1/admin/models",
+        headers={**headers, "Idempotency-Key": "model-register-rejected"},
+        json={
+            "version": "candidate-rejected",
+            "artifact_uri": "gs://models/rejected.joblib",
+            "sha256": "a" * 64,
+            "metrics": {"pr_auc": 0.91},
+        },
+    )
+    assert rejected.status_code == 201
+    activation = client.post(
+        f"/api/v1/admin/models/{rejected.json()['id']}/activate",
+        headers={**headers, "Idempotency-Key": "model-activate-rejected"},
+    )
+    assert activation.status_code == 409
+    assert activation.json()["error"]["code"] == "model_gates_failed"
+
+    approved = client.post(
+        "/api/v1/admin/models",
+        headers={**headers, "Idempotency-Key": "model-register-approved"},
+        json={
+            "version": "candidate-approved",
+            "artifact_uri": "gs://models/approved.joblib",
+            "sha256": "b" * 64,
+            "metrics": {
+                "pr_auc": 0.93,
+                "gates": {
+                    "data": True,
+                    "feature": True,
+                    "evaluation": True,
+                    "security": True,
+                },
+            },
+        },
+    )
+    assert approved.status_code == 201
+    activation = client.post(
+        f"/api/v1/admin/models/{approved.json()['id']}/activate",
+        headers={**headers, "Idempotency-Key": "model-activate-approved"},
+    )
+    assert activation.status_code == 200
+    assert activation.json()["deployment_required"] is True
+    assert activation.json()["runtime_active"] is False
+
+    verification = client.get("/api/v1/admin/audit-events/verify")
+    assert verification.status_code == 200
+    assert verification.json()["valid"] is True
+    assert verification.json()["checked_events"] >= 3
+
+
+def test_explicit_session_revocation_invalidates_the_target_session(client, app) -> None:
+    headers = _administrator(client, app)
+    with TestClient(app, base_url="https://testserver") as member:
+        signed_in = member.post(
+            "/api/v1/session",
+            json={"id_token": "dev:member@example.test:revocation-target"},
+        )
+        assert signed_in.status_code == 201
+        with app.state.session_factory() as db:
+            user = db.scalar(
+                select(UserAccount).where(UserAccount.identity_subject == "revocation-target")
+            )
+            assert user is not None
+            user_id = user.id
+
+        revoked = client.post(
+            f"/api/v1/admin/users/{user_id}/revoke-sessions",
+            headers={**headers, "Idempotency-Key": "explicit-session-revocation"},
+        )
+        assert revoked.status_code == 200
+        assert revoked.json()["revoked_session_count"] == 1
+        assert member.get("/api/v1/me").json()["session_kind"] == "ANONYMOUS"

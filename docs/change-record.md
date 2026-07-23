@@ -2,6 +2,18 @@
 
 Record requirement, architecture, security, privacy, data/model, and operational baseline changes here. Entries are append-only: correct an entry with a dated follow-up rather than silently rewriting its outcome. A change is not accepted merely because code exists; repository verification and live acceptance evidence remain separate.
 
+## CR-2026-07-23-02: Installable client, evidence usability and governed workspace completion
+
+- Status: Implemented candidate; live acceptance pending
+- Drivers: device-consistent presentation, installability, clearer evidence interpretation, public privacy/process transparency, and closure of prototype-to-implementation workflow gaps.
+- Baseline impact: the public shell now follows the device light/dark preference and exposes dedicated How it works and Privacy routes. An install manifest and application icons are provided without an offline scan cache. Evidence values remain typed through the API and are rendered as bounded responsive cards with neutral state language and provenance details.
+- Functional impact: adds recent scans, history search/filter, controlled re-scan and decision export, optional research consent, analyst queue/citation/reveal workflows, real administration telemetry and deployment gates, audit-chain verification, and queued dataset experiment/export processing.
+- Security/privacy impact: no submitted URL is opened by the client. Analyst URL reveal requires a claimed case and fresh authentication and is audited. Research export requires explicit consent plus independent adjudication and excludes comments, identity fields and decrypted URLs. Installability does not introduce background retrieval or sensitive offline caching.
+- Data/model impact: adds one feedback consent field and governed evaluator/export state transitions. Model registry approval now requires explicit data, feature, evaluation and security gates and remains separate from digest-pinned runtime deployment.
+- Rollout: apply Alembic revision `0005`, deploy backend before the compatible client, verify the evaluation CronJob mount and rendered placeholders, then exercise device themes, installation, public routes, responsive evidence, all role journeys and one queued research job.
+- Rollback: retain the additive consent column and registry records, redeploy the prior compatible application digest, and leave queued/running research records for explicit operator review. Do not delete audit or adjudication history.
+- Repository evidence: 103 backend tests, 40 frontend tests, 41 isolated-fetcher tests, TypeScript compilation, production Vite build, a complete Alembic `0001`–`0005` migration exercise and rendered Kustomize manifests. Live browser/device installation, GKE, Web Risk, accessibility and user-comprehension evidence remains pending.
+
 ## CR-2026-07-23-01: Privileged-role governance and administrator continuity
 
 - Status: Implemented candidate; live acceptance pending

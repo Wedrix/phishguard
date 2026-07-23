@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -745,13 +744,24 @@ def create_feedback(
     scan = _service(request, db).get_authorized(scan_id, principal)
     if not scan:
         raise ApiError(404, "not_found", "Scan was not found")
-    feedback = Feedback(scan_id=scan.id, author_user_id=principal.user_id, category=body.category, comment=body.comment)
+    feedback = Feedback(
+        scan_id=scan.id,
+        author_user_id=principal.user_id,
+        category=body.category,
+        comment=body.comment,
+        research_consent=body.research_consent,
+    )
     db.add(feedback)
     db.flush()
     case = ReviewCase(scan_id=scan.id, feedback_id=feedback.id)
     db.add(case)
     db.flush()
-    payload = {"id": feedback.id, "status": feedback.status, "review_case_id": case.id}
+    payload = {
+        "id": feedback.id,
+        "status": feedback.status,
+        "review_case_id": case.id,
+        "research_consent": feedback.research_consent,
+    }
     _store_idempotency(db, principal.key, f"feedback:{scan_id}", key, 201, payload)
     return payload
 
@@ -771,7 +781,14 @@ def get_feedback(
         or not (privileged or principal.user_id and row.author_user_id == principal.user_id)
     ):
         raise ApiError(404, "not_found", "Feedback was not found")
-    return {"id": row.id, "scan_id": row.scan_id, "category": row.category, "comment": row.comment, "status": row.status}
+    return {
+        "id": row.id,
+        "scan_id": row.scan_id,
+        "category": row.category,
+        "comment": row.comment,
+        "status": row.status,
+        "research_consent": row.research_consent,
+    }
 
 
 def _scan_summary(scan: Scan) -> dict[str, Any]:
@@ -831,7 +848,8 @@ def _evidence_payload(row: EvidenceObservation) -> dict[str, Any]:
         "label": row.family.replace("_", " ").title(),
         "state": row.state,
         "source": row.source,
-        "value": json.dumps(row.value, sort_keys=True, separators=(",", ":"))[:2000],
+        "value": row.value,
+        "value_redacted": False,
         "observed_at": row.observed_at.isoformat() if row.observed_at else None,
         "retrieved_at": row.retrieved_at.isoformat(),
         "expires_at": row.expires_at.isoformat() if row.expires_at else None,
@@ -849,7 +867,8 @@ def _public_evidence_payload(row: EvidenceObservation) -> dict[str, Any]:
         "label": row.family.replace("_", " ").title(),
         "state": row.state,
         "source": row.source,
-        "value": "Detailed evidence is hidden in this shared report.",
+        "value": None,
+        "value_redacted": True,
         "observed_at": row.observed_at.isoformat() if row.observed_at else None,
         "version": row.version,
         "reason_code": row.reason_code,

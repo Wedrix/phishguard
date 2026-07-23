@@ -1,0 +1,29 @@
+{
+  "id": "/",
+  "name": "PhishGuard",
+  "short_name": "PhishGuard",
+  "description": "Explainable, privacy-preserving analysis for suspicious links.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f4f5f8",
+  "theme_color": "#2443c4",
+  "icons": [
+    {
+      "src": "/phishguard-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/phishguard-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "/phishguard-icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

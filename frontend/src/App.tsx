@@ -57,6 +57,7 @@ import {
   type DatasetSnapshot,
   type DecisionPolicy,
   type Experiment,
+  type FeedbackReceipt,
   type ModelRelease,
   type PrivilegedRequestedRole,
   type ProviderConfiguration,
@@ -86,7 +87,9 @@ import { SessionProvider, useSession } from "./session";
 
 const publicNavigation: { to: string; label: string; icon: Icon; session?: "GUEST_OR_USER" | "USER" }[] = [
   { to: "/", label: "Scan", icon: MagnifyingGlass },
+  { to: "/how-it-works", label: "How it works", icon: ListChecks },
   { to: "/history", label: "History", icon: ClockCounterClockwise, session: "GUEST_OR_USER" },
+  { to: "/privacy", label: "Privacy", icon: LockKey },
   { to: "/account", label: "Account", icon: UserCircle, session: "USER" },
 ];
 
@@ -171,7 +174,7 @@ function Shell({ children }: { children: ReactNode }) {
   }
 
   return (
-    <div className="app" data-theme={workspace ? "dark" : "light"}>
+    <div className="app">
       <a className="skip-link" href="#main-content">Skip to main content</a>
       <header className="topbar">
         <Brand />
@@ -294,11 +297,22 @@ export function resultPollDelay(serverDelayMs: number | undefined, attempt: numb
 
 function ScanPage() {
   const navigate = useNavigate();
-  const [url, setUrl] = useState("");
+  const location = useLocation();
+  const session = useSession();
+  const [url, setUrl] = useState(() => new URLSearchParams(location.search).get("url") ?? "");
   const [mode, setMode] = useState<"local_only" | "enriched">("local_only");
   const [consent, setConsent] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [recentScans, setRecentScans] = useState<Scan[]>([]);
+
+  useEffect(() => {
+    if (session.status !== "ready" || !["GUEST", "USER"].includes(session.me?.session_kind ?? "ANONYMOUS")) {
+      setRecentScans([]);
+      return;
+    }
+    api.listScans().then((items) => setRecentScans(items.slice(0, 3))).catch(() => setRecentScans([]));
+  }, [session.status, session.me?.session_kind]);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -318,6 +332,7 @@ function ScanPage() {
     setSubmitting(true);
     try {
       const response = await api.createScan({ url, analysis_mode: mode, enrichment_consent: mode === "enriched" && consent });
+      session.refresh().catch(() => undefined);
       navigate(`/scan/${response.scan.id}`, { state: { demo: response.demo } });
     } catch (reason) {
       setError(reason instanceof ApiError ? reason.message : "The scan could not be started. Try again.");
@@ -373,23 +388,92 @@ function ScanPage() {
           <p className="form-footnote"><ShieldCheck aria-hidden /> Automated results support—not replace—your judgement.</p>
         </form>
 
-        <aside className="evidence-aside" aria-label="How PhishGuard works">
-          <p className="eyebrow">How it works</p>
-          <h2>Evidence first. Verdict second.</h2>
-          <ol className="step-list">
-            <li><span>01</span><div><strong>Parse locally</strong><p>Normalize the URL and inspect structural indicators before any network request.</p></div></li>
-            <li><span>02</span><div><strong>Collect safely</strong><p>Only with consent, gather bounded evidence through an isolated service.</p></div></li>
-            <li><span>03</span><div><strong>Explain the result</strong><p>See reasons, counter-evidence, missing evidence and version provenance.</p></div></li>
-          </ol>
-          <div className="aside-callout"><ShieldCheck aria-hidden weight="fill" /><p><strong>Designed for uncertainty</strong>If evidence is missing, PhishGuard says so. Missing evidence is never treated as safe.</p></div>
-        </aside>
+        <Link className="scan-guide-link card" to="/how-it-works"><span className="choice-icon"><ListChecks aria-hidden /></span><span><strong>How does PhishGuard reach a verdict?</strong><small>Review the evidence pipeline, safety boundaries, decision logic, and limitations.</small></span><CaretRight aria-hidden /></Link>
+        {recentScans.length > 0 && <section className="card recent-scans" aria-labelledby="recent-scans-title"><div className="section-heading"><div><p className="eyebrow">Continue reviewing</p><h2 id="recent-scans-title">Recent scans</h2></div><Link to="/history">View all</Link></div>{recentScans.map((scan) => <Link key={scan.id} to={`/scan/${scan.id}`}><span><strong>{scan.display_url}</strong><small>{formatDate(scan.created_at)}</small></span><RiskBadge risk={scan.decision.risk_band} status={scan.status} /><CaretRight aria-hidden /></Link>)}</section>}
       </div>
+    </div>
+  );
+}
+
+function HowItWorksPage() {
+  return (
+    <div className="page how-page">
+      <PageHeader eyebrow="Transparent analysis" title="Evidence first. Verdict second." description="PhishGuard separates local inspection, optional external collection, and decision-making so each result can show exactly what was—and was not—checked." />
+      <ol className="process-grid">
+        <li className="card"><span>01</span><GlobeHemisphereWest aria-hidden /><h2>Validate locally</h2><p>The URL is parsed, normalised, redacted, and checked by deterministic rules and the approved URL-only model before any URL-derived external request.</p></li>
+        <li className="card"><span>02</span><LockKey aria-hidden /><h2>Ask before enrichment</h2><p>Local-only analysis ends here. DNS, RDAP, TLS, redirects, reputation, and static HTML checks require explicit consent for that scan.</p></li>
+        <li className="card"><span>03</span><ShieldCheck aria-hidden /><h2>Collect within a sandbox</h2><p>An isolated fetcher enforces public-address validation, strict redirects and timeouts, content limits, no JavaScript, and no credential or subresource loading.</p></li>
+        <li className="card"><span>04</span><Fingerprint aria-hidden /><h2>Fuse independent signals</h2><p>Versioned rules, calibrated model output, and corroborated evidence contribute bounded weight. Reputation cannot determine the verdict by itself.</p></li>
+        <li className="card"><span>05</span><ClipboardText aria-hidden /><h2>Explain the decision</h2><p>The result preserves provenance and presents risk reasons, counter-evidence, missing checks, limitations, safe next actions, and exact engine versions.</p></li>
+        <li className="card"><span>06</span><WarningCircle aria-hidden /><h2>Keep uncertainty visible</h2><p>Unavailable evidence never becomes a safe signal. It can reduce coverage, produce a partial result, or make the verdict inconclusive.</p></li>
+      </ol>
+      <section className="mode-comparison">
+        <article className="card"><p className="eyebrow">Default</p><h2>Local-only</h2><ul className="plain-list"><li>No destination, DNS, RDAP, or reputation request</li><li>URL structure, rules, and URL-only model</li><li>Fastest and most private analysis scope</li></ul></article>
+        <article className="card"><p className="eyebrow">With per-scan consent</p><h2>Enriched</h2><ul className="plain-list"><li>Isolated destination and infrastructure checks</li><li>Google Web Risk lookup under provider policy</li><li>Missing checks stay explicit and neutral</li></ul></article>
+      </section>
+      <div className="alert alert-warning how-limit"><WarningCircle aria-hidden /><span><strong>What PhishGuard cannot promise.</strong>Automated evidence can be incomplete, stale, or adversarially manipulated. A low-risk result is not proof of safety, and the application never offers to open the submitted URL.</span></div>
+      <div className="page-actions how-actions"><Link className="button button-primary" to="/"><MagnifyingGlass aria-hidden />Analyze a URL</Link><Link className="button button-secondary" to="/privacy"><LockKey aria-hidden />Review privacy controls</Link></div>
+    </div>
+  );
+}
+
+function PrivacyPage() {
+  const session = useSession();
+  const retentionDays = session.me?.scan_retention_max_days ?? 30;
+  return (
+    <div className="page privacy-page">
+      <PageHeader
+        eyebrow="Privacy and data use"
+        title="You choose what leaves your browser session"
+        description="PhishGuard starts with local URL analysis and makes external checks only when you explicitly request enriched evidence."
+      />
+      <section className="privacy-hero card" aria-labelledby="privacy-default-title">
+        <div className="privacy-hero-icon"><LockKey aria-hidden weight="fill" /></div>
+        <div>
+          <h2 id="privacy-default-title">Local-only is the default</h2>
+          <p>Local-only scans inspect URL structure without contacting the destination, DNS, RDAP, Google Web Risk, or externally derived caches.</p>
+        </div>
+      </section>
+      <div className="privacy-grid">
+        <article className="card privacy-card">
+          <Fingerprint aria-hidden />
+          <h2>Enrichment requires consent</h2>
+          <p>For each enriched scan, PhishGuard asks first. The isolated fetcher may contact the destination and registration services, and the full URL may be sent to Google Web Risk.</p>
+        </article>
+        <article className="card privacy-card">
+          <Database aria-hidden />
+          <h2>Stored with restraint</h2>
+          <p>Original URLs are encrypted. Interfaces and logs use redacted values, and target response bodies or raw HTML are never stored by the application.</p>
+        </article>
+        <article className="card privacy-card">
+          <ClockCounterClockwise aria-hidden />
+          <h2>Limited retention</h2>
+          <p>Guest scans expire after one hour. Signed-in users can choose retention for new scans up to {retentionDays} days and delete individual or all stored scans.</p>
+        </article>
+        <article className="card privacy-card">
+          <UsersThree aria-hidden />
+          <h2>Governed use</h2>
+          <p>Feedback is quarantined from training data until independently adjudicated. Shared reports are temporary, unguessable, and redact the submitted URL and account details.</p>
+        </article>
+      </div>
+      <section className="card privacy-controls">
+        <div>
+          <ShieldCheck aria-hidden />
+          <div><h2>Your controls</h2><p>Review saved scans, download a redacted account export, adjust retention, or remove stored scan data.</p></div>
+        </div>
+        <div className="page-actions">
+          {session.me?.session_kind === "USER" ? <Link className="button button-primary" to="/account">Open account controls</Link> : session.me?.session_kind === "GUEST" ? <Link className="button button-primary" to="/history">Review guest history</Link> : <Link className="button button-primary" to="/sign-in">Sign in for account controls</Link>}
+          <Link className="button button-secondary" to="/">Return to scanner</Link>
+        </div>
+      </section>
+      <div className="alert alert-info privacy-caveat"><Info aria-hidden /><span><strong>Automated analysis has limits.</strong>PhishGuard never opens the submitted URL for you and no result is a guarantee of safety.</span></div>
     </div>
   );
 }
 
 function ResultPage({ shared = false }: { shared?: boolean }) {
   const { id = "" } = useParams();
+  const navigate = useNavigate();
   const [scan, setScan] = useState<Scan | null>(null);
   const [error, setError] = useState("");
   const [pollingPause, setPollingPause] = useState<{ reason: "deadline" | "error"; message: string } | null>(null);
@@ -400,6 +484,8 @@ function ResultPage({ shared = false }: { shared?: boolean }) {
   const [shareUrl, setShareUrl] = useState("");
   const [reportExpiresAt, setReportExpiresAt] = useState("");
   const [completionAnnouncement, setCompletionAnnouncement] = useState("");
+  const [pendingRescan, setPendingRescan] = useState<(() => Promise<void>) | null>(null);
+  const [rescanError, setRescanError] = useState("");
   const shareDialog = useRef<HTMLDialogElement>(null);
   const loadedTarget = useRef<string | null>(null);
   const previousScanStatus = useRef<{ target: string; status: Scan["status"] } | null>(null);
@@ -470,6 +556,38 @@ function ResultPage({ shared = false }: { shared?: boolean }) {
     setPollCycle((value) => value + 1);
   }
 
+  function downloadDecision() {
+    if (!scan) return;
+    const payload = {
+      schema_version: "phishguard-decision-export/1",
+      exported_at: new Date().toISOString(),
+      scan_id: scan.id,
+      redacted_url: scan.display_url,
+      status: scan.status,
+      decision: scan.decision,
+    };
+    const objectUrl = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = `phishguard-decision-${scan.id}.json`;
+    link.click();
+    URL.revokeObjectURL(objectUrl);
+  }
+
+  async function prepareRescan() {
+    setRescanError("");
+    try {
+      const revealed = await api.revealOriginalUrl(id);
+      navigate(`/?url=${encodeURIComponent(revealed.url)}`);
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.code === "fresh_auth_required") {
+        setPendingRescan(() => prepareRescan);
+      } else {
+        setRescanError(apiMessage(reason, "The original URL could not be prepared for a new scan."));
+      }
+    }
+  }
+
   if (error && !scan) return <div className="page narrow-page"><div className="empty-state"><XCircle aria-hidden /><h1>Scan unavailable</h1><p role="alert">{error}</p><div className="form-actions"><button className="button button-secondary" type="button" onClick={retryPolling}><ArrowClockwise aria-hidden /> Try again</button><Link className="button button-primary" to="/">Start a new scan</Link></div></div></div>;
   if (!scan) return <ResultSkeleton />;
 
@@ -478,6 +596,7 @@ function ResultPage({ shared = false }: { shared?: boolean }) {
   const RiskIcon = presentation.icon;
   const limitedCoverage = decision.completion === "PARTIAL" || scan.status === "PARTIAL";
   const openLimitations = limitedCoverage || decision.risk_band === "INCONCLUSIVE" || decision.missing_evidence.length > 0;
+  const resolvedEvidence = decision.evidence.filter((item) => ["OBSERVED", "NO_MATCH", "NOT_APPLICABLE"].includes(item.state)).length;
   const riskGuidance: Record<RiskBand, { className: string; content: ReactNode }> = {
     HIGH: { className: "alert-danger", content: <><strong>Do not open this link or enter any information.</strong>Use a known address or verified bookmark instead.</> },
     MEDIUM: { className: "alert-warning", content: <><strong>Verify the request through a trusted channel.</strong>Do not rely on contact details provided with the link.</> },
@@ -512,11 +631,14 @@ function ResultPage({ shared = false }: { shared?: boolean }) {
       <div className="result-toolbar">
         <Link className="back-link" to="/"><CaretRight aria-hidden /> New scan</Link>
         {!shared && <div>
+          <button className="button button-secondary" type="button" onClick={prepareRescan}><ArrowClockwise aria-hidden /> Re-scan</button>
+          <button className="button button-secondary" type="button" onClick={downloadDecision}><FileText aria-hidden /> Download JSON</button>
           <button className="button button-secondary" onClick={() => shareDialog.current?.showModal()}>Share report</button>
           <Link className="button button-secondary" to={`/feedback/${scan.id}`}>Give feedback</Link>
         </div>}
       </div>
       {(scan.simulated || scan.id.startsWith("demo-")) && <SimulatedDataBanner shared={shared} />}
+      {rescanError && <div className="alert alert-danger shared-report-note" role="alert"><WarningCircle aria-hidden />{rescanError}</div>}
       {shared && <div className="alert alert-info shared-report-note" role="status"><Eye aria-hidden /><span><strong>Read-only shared report.</strong> This redacted view expires {formatDate(reportExpiresAt)}.</span></div>}
       <section className={`risk-summary risk-${decision.risk_band.toLowerCase()}`} aria-labelledby="result-title">
         <div className="risk-icon"><RiskIcon aria-hidden weight="fill" /></div>
@@ -525,6 +647,7 @@ function ResultPage({ shared = false }: { shared?: boolean }) {
           <h1 id="result-title">{presentation.title}</h1>
           <p className="display-url">{scan.display_url}{scan.ascii_display_url && <small>ASCII: {scan.ascii_display_url}</small>}</p>
           <p>{decision.reasons[0] || presentation.summary}</p>
+          <p className="evidence-coverage"><ClipboardText aria-hidden /><strong>Evidence coverage:</strong> {resolvedEvidence} of {decision.evidence.length} observations resolved{decision.evidence.length === 0 ? "." : ` · ${decision.missing_evidence.length} explicitly missing.`}</p>
           {limitedCoverage && <div className="alert alert-warning coverage-note"><WarningCircle aria-hidden /><span><strong>Partial evidence coverage.</strong>Some checks were unavailable. Missing evidence did not lower the risk.</span></div>}
           {decision.engine_mode === "RULE_ONLY" && <div className="alert alert-warning coverage-note"><ShieldWarning aria-hidden /><span><strong>Rule-only result.</strong>The approved model was unavailable, so this decision uses deterministic rules and available evidence only.</span></div>}
           {scan.status === "PROCESSING" && (pollingPause ? <div className={`alert ${pollingPause.reason === "error" ? "alert-danger" : "alert-warning"} polling-paused`} role={pollingPause.reason === "error" ? "alert" : "status"}><WarningCircle aria-hidden /><span><strong>Automatic updates paused.</strong>{pollingPause.message}</span><button className="button button-secondary button-small" type="button" onClick={retryPolling}><ArrowClockwise aria-hidden />Check again</button></div> : <div className="progress-note" role="status"><CircleNotch className="spinner" aria-hidden /><span><strong>External checks are still running; risk may increase.</strong>This page updates automatically when enrichment finishes.</span></div>)}
@@ -538,8 +661,7 @@ function ResultPage({ shared = false }: { shared?: boolean }) {
             {decision.counter_evidence.length > 0 && <div className="counter-evidence"><CheckCircle aria-hidden /><div><strong>Counter-evidence</strong>{decision.counter_evidence.map((item) => <p key={item}>{item}</p>)}</div></div>}
           </ResultSection>
           <ResultSection title="Evidence" icon={ClipboardText} count={decision.evidence.length}>
-            {decision.evidence.length ? <div className="evidence-table" role="table" aria-label="Evidence observations">
-              <div className="evidence-row evidence-head" role="row"><span role="columnheader">Observation</span><span role="columnheader">State</span><span role="columnheader">Source</span></div>
+            {decision.evidence.length ? <div className="evidence-list" aria-label="Evidence observations">
               {decision.evidence.map((item) => <EvidenceRow key={item.id} item={item} />)}
             </div> : <p className="section-empty">No evidence observations were stored for this decision.</p>}
           </ResultSection>
@@ -576,6 +698,7 @@ function ResultPage({ shared = false }: { shared?: boolean }) {
           <div className="dialog-actions"><button className="button button-secondary" value="cancel">Cancel</button><button type="button" className="button button-primary" onClick={copyReport} disabled={sharing}>{sharing ? "Creating link…" : copied ? "Copied" : shareUrl ? "Copy link" : "Create and copy link"}</button></div>
         </form>
       </dialog>}
+      {pendingRescan && <FreshAuthDialog action={pendingRescan} close={() => setPendingRescan(null)} />}
     </div>
   );
 }
@@ -588,14 +711,77 @@ function ResultSection({ title, icon: SectionIcon, count, open, children }: { ti
   return <details className="result-section" open={open}><summary><span><SectionIcon aria-hidden />{title}{count !== undefined && <small>{count}</small>}</span><CaretRight className="section-caret" aria-hidden /></summary><div className="section-body">{children}</div></details>;
 }
 
+const evidenceStateLabels: Record<EvidenceObservation["state"], string> = {
+  OBSERVED: "Available",
+  NO_MATCH: "No match",
+  NOT_APPLICABLE: "Not applicable",
+  SKIPPED_POLICY: "Skipped by policy",
+  UNAVAILABLE: "Unavailable",
+  TIMED_OUT: "Timed out",
+  REJECTED_SAFETY: "Blocked for safety",
+  STALE: "Stale",
+};
+
+function evidenceName(item: EvidenceObservation) {
+  const label = item.label?.trim() || item.family;
+  return label.replace(/\b(dns|rdap|tls|url|html)\b/gi, (value) => value.toUpperCase());
+}
+
+function sourceName(source: string) {
+  if (source === "google_web_risk") return "Google Web Risk";
+  if (source.startsWith("isolated_fetcher:")) return `Isolated fetcher · ${source.slice("isolated_fetcher:".length).replaceAll(/[_-]/g, " ")}`;
+  return source.replaceAll(/[_-]/g, " ");
+}
+
+function evidenceSummary(item: EvidenceObservation) {
+  if (item.value_redacted) return "Detailed evidence is hidden in this shared report.";
+  if (!["OBSERVED", "NO_MATCH"].includes(item.state)) {
+    return item.reason_code ? `Check ${item.reason_code.replaceAll("_", " ")}.` : `${evidenceStateLabels[item.state]}.`;
+  }
+  const value = item.value ?? {};
+  const family = item.family.toUpperCase();
+  const list = (key: string) => Array.isArray(value[key]) ? value[key] as unknown[] : [];
+  const number = (key: string) => typeof value[key] === "number" ? value[key] as number : 0;
+  if (family === "DNS") {
+    const addresses = list("addresses");
+    return addresses.length ? `${addresses.length} public address${addresses.length === 1 ? "" : "es"} resolved: ${addresses.join(", ")}.` : "No public address was returned.";
+  }
+  if (family === "RDAP") {
+    const events = value.events && typeof value.events === "object" ? value.events as Record<string, unknown> : {};
+    const registered = typeof events.registration === "string" ? formatDate(events.registration) : undefined;
+    const expires = typeof events.expiration === "string" ? formatDate(events.expiration) : undefined;
+    return [registered && `Registered ${registered}`, expires && `expires ${expires}`, `${list("nameservers").length} nameserver${list("nameservers").length === 1 ? "" : "s"}`].filter(Boolean).join(" · ") + ".";
+  }
+  if (family === "REDIRECT") {
+    const count = number("count");
+    return count ? `${count} redirect${count === 1 ? "" : "s"} followed within the safety limit.` : "No redirect was followed.";
+  }
+  if (family === "REPUTATION") {
+    return item.state === "NO_MATCH" ? "No supported threat-list match was returned; this is neutral evidence, not proof of safety." : "The reputation provider returned a threat-list match.";
+  }
+  if (family === "STATIC_HTML") {
+    return `${number("forms")} form${number("forms") === 1 ? "" : "s"} · ${number("password_inputs")} password field${number("password_inputs") === 1 ? "" : "s"} · ${number("external_links")} external link${number("external_links") === 1 ? "" : "s"}.`;
+  }
+  if (family === "TLS") {
+    if (!Object.keys(value).length) return "TLS evidence was not applicable to this destination.";
+    return `${typeof value.version === "string" ? value.version : "TLS"} connection${value.hostname_verified === true ? " with a verified hostname" : ""}.`;
+  }
+  if (family === "URL") {
+    if (typeof value.protocol === "string") return `${String(value.protocol).toUpperCase()} transport scheme.`;
+    const matches = list("matches");
+    return matches.length ? `${matches.length} suspicious URL term${matches.length === 1 ? "" : "s"} found: ${matches.join(", ")}.` : "No suspicious URL terms matched.";
+  }
+  return Object.keys(value).length ? `${Object.keys(value).length} structured field${Object.keys(value).length === 1 ? "" : "s"} available.` : evidenceStateLabels[item.state] + ".";
+}
+
 function EvidenceRow({ item }: { item: EvidenceObservation }) {
-  const positive = item.state === "OBSERVED";
   return (
-    <div className="evidence-row" role="row">
-      <span role="cell"><strong>{item.label}</strong><small>{item.value}</small></span>
-      <span role="cell"><span className={`evidence-state ${positive ? "state-observed" : ""}`}>{item.state.replaceAll("_", " ")}</span></span>
-      <span role="cell"><span>{item.source}</span><small>{item.version}{item.observed_at ? ` · ${formatDate(item.observed_at)}` : ""}{item.cached ? " · cached" : ""}</small>{item.reason_code && <small>{item.reason_code.replaceAll("_", " ")}</small>}</span>
-    </div>
+    <article className="evidence-card">
+      <header><div><p className="eyebrow">{item.family.replaceAll("_", " ")}</p><h3>{evidenceName(item)}</h3></div><span className={`evidence-state state-${item.state.toLowerCase()}`}>{evidenceStateLabels[item.state]}</span></header>
+      <p className="evidence-summary">{evidenceSummary(item)}</p>
+      <div className="evidence-meta"><span><strong>Source</strong>{sourceName(item.source)}</span><span><strong>Version</strong>{item.version}</span>{item.observed_at && <span><strong>Observed</strong>{formatDate(item.observed_at)}</span>}{item.cached && <span><strong>Cache</strong>Cached observation</span>}</div>
+      {!item.value_redacted && item.value && Object.keys(item.value).length > 0 && <details className="evidence-technical"><summary>Technical details</summary><pre>{JSON.stringify(item.value, null, 2)}</pre></details>}
+    </article>
   );
 }
 
@@ -604,6 +790,8 @@ function HistoryPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [query, setQuery] = useState("");
+  const [riskFilter, setRiskFilter] = useState<"ALL" | RiskBand>("ALL");
   const [deleteTarget, setDeleteTarget] = useState<Scan | null>(null);
   const [deleteError, setDeleteError] = useState("");
   const [deleting, setDeleting] = useState(false);
@@ -654,6 +842,11 @@ function HistoryPage() {
     }
   }
 
+  const visibleScans = scans.filter((scan) => {
+    const matchesQuery = !query.trim() || scan.display_url.toLowerCase().includes(query.trim().toLowerCase()) || scan.id.toLowerCase().includes(query.trim().toLowerCase());
+    return matchesQuery && (riskFilter === "ALL" || scan.decision.risk_band === riskFilter);
+  });
+
   return (
     <div className="page">
       <PageHeader eyebrow="Your account" title="Scan history" description="Only redacted URLs are shown here. Delete records whenever you no longer need them." actions={<Link className="button button-primary" to="/"><MagnifyingGlass aria-hidden /> New scan</Link>} />
@@ -663,10 +856,12 @@ function HistoryPage() {
       ) : scans.length === 0 ? (
         <div className="empty-state card"><ClockCounterClockwise aria-hidden /><h2>No saved scans</h2><p>Your completed scans will appear here.</p><Link className="button button-primary" to="/">Analyze a URL</Link></div>
       ) : (
-        <>{scans.some((scan) => scan.simulated || scan.id.startsWith("demo-")) && <SimulatedDataBanner />}<div className="table-card">
+        <>{scans.some((scan) => scan.simulated || scan.id.startsWith("demo-")) && <SimulatedDataBanner />}
+        <div className="toolbar card"><div className="search-field"><MagnifyingGlass aria-hidden /><input aria-label="Search scan history" placeholder="Search redacted URL or scan ID" value={query} onChange={(event) => setQuery(event.target.value)} /></div><select aria-label="Filter by risk" value={riskFilter} onChange={(event) => setRiskFilter(event.target.value as "ALL" | RiskBand)}><option value="ALL">All risk bands</option><option value="HIGH">High risk</option><option value="MEDIUM">Medium risk</option><option value="LOW">Low risk</option><option value="INCONCLUSIVE">Inconclusive</option></select></div>
+        {visibleScans.length === 0 ? <div className="empty-state card compact-empty"><MagnifyingGlass aria-hidden /><h2>No matching scans</h2><p>Change the search text or risk filter.</p><button className="button button-secondary" type="button" onClick={() => { setQuery(""); setRiskFilter("ALL"); }}>Clear filters</button></div> : <div className="table-card">
           <div className="data-table history-data-table" role="table" aria-label="Scan history">
             <div className="data-row data-head" role="row"><span role="columnheader">URL</span><span role="columnheader">Risk</span><span role="columnheader">Scope</span><span role="columnheader">Scanned</span><span role="columnheader"><span className="sr-only">Actions</span></span></div>
-            {scans.map((scan) => (
+            {visibleScans.map((scan) => (
               <div className="data-row" role="row" key={scan.id}>
                 <span role="cell"><Link className="table-link" to={`/scan/${scan.id}`}>{scan.display_url}</Link><small>{scan.id.slice(0, 16)}</small></span>
                 <span role="cell"><RiskBadge risk={scan.decision.risk_band} status={scan.status} /></span>
@@ -676,7 +871,7 @@ function HistoryPage() {
               </div>
             ))}
           </div>
-        </div></>
+        </div>}</>
       )}
       {deleteTarget && <dialog ref={deleteDialog} className="dialog" aria-modal="true" aria-labelledby="delete-scan-title" aria-describedby="delete-scan-description" onCancel={(event) => { if (deleting) event.preventDefault(); }} onClose={() => { if (!deleting) { setDeleteTarget(null); setDeleteError(""); } }}>
         <form onSubmit={confirmDelete} aria-busy={deleting}>
@@ -937,6 +1132,8 @@ function FeedbackPage() {
   const [verdict, setVerdict] = useState("");
   const [comment, setComment] = useState("");
   const [sent, setSent] = useState(false);
+  const [receipt, setReceipt] = useState<FeedbackReceipt | null>(null);
+  const [researchConsent, setResearchConsent] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   async function submit(event: FormEvent) {
@@ -944,7 +1141,8 @@ function FeedbackPage() {
     setBusy(true);
     setError("");
     try {
-      await api.submitFeedback(scanId, verdict, comment);
+      const nextReceipt = await api.submitFeedback(scanId, verdict, comment, researchConsent);
+      setReceipt(nextReceipt);
       setSent(true);
     } catch (reason) {
       setError(apiMessage(reason, "Feedback could not be submitted. Try again."));
@@ -952,12 +1150,22 @@ function FeedbackPage() {
       setBusy(false);
     }
   }
-  if (sent) return <div className="page narrow-page"><div className="empty-state card"><CheckCircle aria-hidden /><h1>Feedback received</h1><p>Your report is quarantined for independent analyst review. It does not change the original result.</p><Link className="button button-primary" to={`/scan/${scanId}`}>Return to result</Link></div></div>;
-  return <div className="page narrow-page"><PageHeader eyebrow="Improve the evidence" title="Report an incorrect result" description="Feedback is reviewed independently and never becomes training data automatically." /><form className="card feedback-card" onSubmit={submit} aria-busy={busy}><fieldset disabled={busy}><legend>What seems wrong?</legend><div className="feedback-choices"><label className={verdict === "should_be_high" ? "selected" : ""}><input type="radio" name="verdict" value="should_be_high" required onChange={(event) => setVerdict(event.target.value)} /><ThumbsDown aria-hidden /><span><strong>This link is more dangerous</strong><small>The displayed risk is too low.</small></span></label><label className={verdict === "should_be_low" ? "selected" : ""}><input type="radio" name="verdict" value="should_be_low" onChange={(event) => setVerdict(event.target.value)} /><ThumbsUp aria-hidden /><span><strong>This link is safer</strong><small>The displayed risk is too high.</small></span></label></div></fieldset><label className="field"><span>What evidence should we review? <small>Optional</small></span><textarea maxLength={1000} rows={5} value={comment} disabled={busy} onChange={(event) => setComment(event.target.value)} placeholder="Do not include passwords or other sensitive information." /><small className="character-count">{comment.length} / 1000</small></label>{error && <div className="alert alert-danger" role="alert"><WarningCircle aria-hidden /><span>{error}</span></div>}<div className="form-actions"><Link className="button button-secondary" aria-disabled={busy} to={`/scan/${scanId}`}>Cancel</Link><button className="button button-primary" disabled={!verdict || busy}>{busy ? <><CircleNotch className="spinner" aria-hidden />Submitting…</> : "Submit feedback"}</button></div></form></div>;
+  if (sent) return <div className="page narrow-page"><div className="empty-state card"><CheckCircle aria-hidden /><h1>Feedback received</h1><p>Your report is quarantined for independent analyst review. It does not change the original result.</p>{receipt && <dl className="feedback-receipt"><div><dt>Status</dt><dd>{receipt.status.replaceAll("_", " ")}</dd></div><div><dt>Reference</dt><dd>{receipt.id}</dd></div><div><dt>Research consideration</dt><dd>{receipt.research_consent ? "Consented, subject to adjudication" : "Not permitted"}</dd></div></dl>}<Link className="button button-primary" to={`/scan/${scanId}`}>Return to result</Link></div></div>;
+  return <div className="page narrow-page"><PageHeader eyebrow="Improve the evidence" title="Report an incorrect result" description="Feedback is reviewed independently and never becomes training data automatically." /><form className="card feedback-card" onSubmit={submit} aria-busy={busy}><fieldset disabled={busy}><legend>What seems wrong?</legend><div className="feedback-choices"><label className={verdict === "should_be_high" ? "selected" : ""}><input type="radio" name="verdict" value="should_be_high" required onChange={(event) => setVerdict(event.target.value)} /><ThumbsDown aria-hidden /><span><strong>This link is more dangerous</strong><small>The displayed risk is too low.</small></span></label><label className={verdict === "should_be_low" ? "selected" : ""}><input type="radio" name="verdict" value="should_be_low" onChange={(event) => setVerdict(event.target.value)} /><ThumbsUp aria-hidden /><span><strong>This link is safer</strong><small>The displayed risk is too high.</small></span></label></div></fieldset><label className="field"><span>What evidence should we review? <small>Optional</small></span><textarea maxLength={1000} rows={5} value={comment} disabled={busy} onChange={(event) => setComment(event.target.value)} placeholder="Do not include passwords or other sensitive information." /><small className="character-count">{comment.length} / 1000</small></label><label className="research-consent"><input type="checkbox" checked={researchConsent} disabled={busy} onChange={(event) => setResearchConsent(event.target.checked)} /><span><strong>Allow governed research consideration</strong><small>Optional. Even with consent, this feedback remains quarantined and cannot enter a research dataset until independently adjudicated and included in an approved snapshot.</small></span></label>{error && <div className="alert alert-danger" role="alert"><WarningCircle aria-hidden /><span>{error}</span></div>}<div className="form-actions"><Link className="button button-secondary" aria-disabled={busy} to={`/scan/${scanId}`}>Cancel</Link><button className="button button-primary" disabled={!verdict || busy}>{busy ? <><CircleNotch className="spinner" aria-hidden />Submitting…</> : "Submit feedback"}</button></div></form></div>;
 }
 
 function apiMessage(reason: unknown, fallback: string) {
   return reason instanceof ApiError ? reason.message : fallback;
+}
+
+function parseJsonObject(value: string, label: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+    return parsed as Record<string, unknown>;
+  } catch {
+    throw new Error(`${label} must be a valid JSON object.`);
+  }
 }
 
 function WorkspaceFailure({ message, retry }: { message: string; retry: () => void }) {
@@ -969,10 +1177,12 @@ function WorkspaceEmpty({ title, detail }: { title: string; detail: string }) {
 }
 
 function AnalystCasesPage() {
+  const session = useSession();
   const [cases, setCases] = useState<ReviewCase[] | null>(null);
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
   const [stateFilter, setStateFilter] = useState("ALL");
+  const [queueView, setQueueView] = useState<"OPEN" | "MINE" | "ADJUDICATED">("OPEN");
 
   function load() {
     setError("");
@@ -983,14 +1193,23 @@ function AnalystCasesPage() {
 
   const visible = (cases ?? []).filter((item) => {
     const matchesText = `${item.id} ${item.scan_id}`.toLowerCase().includes(query.toLowerCase());
-    return matchesText && (stateFilter === "ALL" || item.state === stateFilter);
+    const matchesQueue = queueView === "OPEN"
+      ? item.state !== "ADJUDICATED"
+      : queueView === "MINE"
+        ? item.state !== "ADJUDICATED" && item.claimed_by === session.me?.user_id
+        : item.state === "ADJUDICATED";
+    return matchesText && matchesQueue && (stateFilter === "ALL" || item.state === stateFilter);
   });
   const states = [...new Set((cases ?? []).map((item) => item.state))].sort();
   const unassigned = (cases ?? []).filter((item) => !item.claimed_by).length;
+  const openCount = (cases ?? []).filter((item) => item.state !== "ADJUDICATED").length;
+  const mineCount = (cases ?? []).filter((item) => item.state !== "ADJUDICATED" && item.claimed_by === session.me?.user_id).length;
+  const adjudicatedCount = (cases ?? []).filter((item) => item.state === "ADJUDICATED").length;
 
   return <div className="page workspace-page">
     <PageHeader eyebrow="Analyst workspace" title="Review cases" description="Review persisted feedback cases. Submitted targets remain inert text." actions={<button className="button button-secondary" type="button" onClick={load}>Refresh</button>} />
     {cases && <div className="metric-grid"><Metric label="Cases returned" value={String(cases.length)} detail="Latest 100 records" icon={ListChecks} /><Metric label="Unassigned" value={String(unassigned)} detail="No recorded claimant" icon={UsersThree} /><Metric label="States" value={String(states.length)} detail="Persisted workflow states" icon={SlidersHorizontal} /></div>}
+    <div className="queue-switcher card" aria-label="Case queue view"><button type="button" className={queueView === "OPEN" ? "active" : ""} onClick={() => setQueueView("OPEN")}>Open <span>{openCount}</span></button><button type="button" className={queueView === "MINE" ? "active" : ""} onClick={() => setQueueView("MINE")}>Mine <span>{mineCount}</span></button><button type="button" className={queueView === "ADJUDICATED" ? "active" : ""} onClick={() => setQueueView("ADJUDICATED")}>Adjudicated <span>{adjudicatedCount}</span></button></div>
     <div className="toolbar card"><div className="search-field"><MagnifyingGlass aria-hidden /><input aria-label="Search cases" placeholder="Search case or scan ID" value={query} onChange={(event) => setQuery(event.target.value)} /></div><select aria-label="Filter by state" value={stateFilter} onChange={(event) => setStateFilter(event.target.value)}><option value="ALL">All states</option>{states.map((state) => <option value={state} key={state}>{state.replaceAll("_", " ")}</option>)}</select></div>
     {!cases && !error && <div className="skeleton skeleton-panel" aria-label="Loading review cases" />}
     {error && <WorkspaceFailure message={error} retry={load} />}
@@ -1001,6 +1220,8 @@ function AnalystCasesPage() {
 
 function AnalystCasePage() {
   const { id = "" } = useParams();
+  const navigate = useNavigate();
+  const session = useSession();
   const [reviewCase, setReviewCase] = useState<ReviewCaseDetail | null>(null);
   const [scan, setScan] = useState<Scan | null>(null);
   const [scanUnavailable, setScanUnavailable] = useState(false);
@@ -1009,6 +1230,9 @@ function AnalystCasePage() {
   const [busy, setBusy] = useState(false);
   const [outcome, setOutcome] = useState<"" | "MALICIOUS" | "BENIGN" | "INCONCLUSIVE">("");
   const [note, setNote] = useState("");
+  const [evidenceIds, setEvidenceIds] = useState<string[]>([]);
+  const [revealedUrl, setRevealedUrl] = useState("");
+  const [pendingSensitiveAction, setPendingSensitiveAction] = useState<(() => Promise<void>) | null>(null);
 
   async function load() {
     setError("");
@@ -1037,7 +1261,10 @@ function AnalystCasePage() {
       const detail = await api.getReviewCase(id);
       setReviewCase(detail);
       setNote("");
-      if (action.action === "adjudicate") setOutcome("");
+      if (action.action === "adjudicate") {
+        setOutcome("");
+        setEvidenceIds([]);
+      }
     } catch (reason) {
       setActionError(apiMessage(reason, "The review action could not be recorded."));
     } finally {
@@ -1045,18 +1272,40 @@ function AnalystCasePage() {
     }
   }
 
+  async function revealOriginal(forRescan = false) {
+    setActionError("");
+    try {
+      const result = await api.revealReviewCaseUrl(id);
+      if (forRescan) navigate(`/?url=${encodeURIComponent(result.url)}`);
+      else setRevealedUrl(result.url);
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.code === "fresh_auth_required") {
+        setPendingSensitiveAction(() => () => revealOriginal(forRescan));
+      } else {
+        setActionError(apiMessage(reason, "The original URL could not be revealed."));
+      }
+    }
+  }
+
+  function toggleEvidence(evidenceId: string) {
+    setEvidenceIds((current) => current.includes(evidenceId) ? current.filter((item) => item !== evidenceId) : [...current, evidenceId]);
+  }
+
   if (!reviewCase && !error) return <div className="page workspace-page"><div className="skeleton skeleton-panel" aria-label="Loading review case" /></div>;
   if (error) return <div className="page workspace-page"><WorkspaceFailure message={error} retry={load} /></div>;
   if (!reviewCase) return null;
+  const isMine = reviewCase.claimed_by === session.me?.user_id;
+  const isClosed = reviewCase.state === "ADJUDICATED";
 
   return <div className="page workspace-page">
-    <div className="result-toolbar"><Link className="back-link" to="/analyst/cases"><CaretRight aria-hidden /> All cases</Link><div><button className="button button-secondary" disabled={busy} type="button" onClick={() => act({ action: reviewCase.claimed_by ? "release" : "claim" })}>{reviewCase.claimed_by ? "Release claim" : "Claim case"}</button></div></div>
+    <div className="result-toolbar"><Link className="back-link" to="/analyst/cases"><CaretRight aria-hidden /> All cases</Link><div>{isMine && !isClosed && <><button className="button button-secondary" disabled={busy} type="button" onClick={() => revealOriginal(false)}><Eye aria-hidden />Reveal URL</button><button className="button button-secondary" disabled={busy} type="button" onClick={() => revealOriginal(true)}><ArrowClockwise aria-hidden />Controlled re-scan</button></>}{!isClosed && (!reviewCase.claimed_by || isMine) && <button className="button button-secondary" disabled={busy} type="button" onClick={() => act({ action: isMine ? "release" : "claim" })}>{isMine ? "Release claim" : "Claim case"}</button>}</div></div>
     <PageHeader eyebrow="Analyst review" title={reviewCase.id} description={`State ${reviewCase.state.replaceAll("_", " ")} · updated ${formatDate(reviewCase.updated_at)}`} />
     <div className="case-layout"><section>
-      {reviewCase.feedback && <section className="card review-feedback" aria-labelledby="submitted-feedback-title"><div className="section-heading"><div><p className="eyebrow">Quarantined user report</p><h2 id="submitted-feedback-title">Submitted feedback</h2></div><span className="badge badge-neutral">{reviewCase.feedback.status.replaceAll("_", " ")}</span></div><dl><div><dt>Category</dt><dd>{reviewCase.feedback.category.replaceAll("_", " ")}</dd></div><div><dt>Submitted</dt><dd>{formatDate(reviewCase.feedback.created_at)}</dd></div></dl><p>{reviewCase.feedback.comment || "No supporting comment was provided."}</p><small>Feedback cannot alter a result or enter training data without independent adjudication.</small></section>}
-      {scan ? <><div className="card case-url"><span>Redacted submitted URL</span><code>{defangUrl(scan.display_url)}</code><div><RiskBadge risk={scan.decision.risk_band} /><StatusBadge status={scan.status} /><span className="badge badge-neutral">{scan.decision.analysis_scope.replaceAll("_", " ")}</span></div></div><ResultSection title="Stored decision reasons" icon={Fingerprint} count={scan.decision.reasons.length} open>{scan.decision.reasons.length ? <ul className="finding-list">{scan.decision.reasons.map((reason, index) => <li key={reason}><span>{index + 1}</span><p>{reason}</p></li>)}</ul> : <p>No reason templates were stored for this decision.</p>}</ResultSection><ResultSection title="Pinned evidence" icon={Database} count={scan.decision.evidence.length} open>{scan.decision.evidence.length ? <div className="evidence-table">{scan.decision.evidence.map((item) => <EvidenceRow item={item} key={item.id} />)}</div> : <p>No evidence observations are exposed for this decision.</p>}</ResultSection></> : scanUnavailable && <div className="alert alert-warning"><WarningCircle aria-hidden /><span><strong>Scan evidence is unavailable.</strong>The case record remains accessible, but its linked scan could not be read.</span></div>}
-      <section className="card event-panel"><div className="section-heading"><div><p className="eyebrow">Append-only history</p><h2>Case events</h2></div><span className="badge badge-neutral">{reviewCase.events.length}</span></div>{reviewCase.events.length ? <ol className="event-list">{reviewCase.events.map((event) => <li key={event.id}><div><strong>{event.action.replaceAll("_", " ")}</strong><time dateTime={event.created_at}>{formatDate(event.created_at)}</time></div>{event.detail.outcome && <p>Outcome: {event.detail.outcome}</p>}{event.detail.note && <p>{event.detail.note}</p>}</li>)}</ol> : <p className="muted-copy">No case events have been recorded.</p>}</section>
-    </section><aside className="card review-panel"><h2>Record review action</h2><p className="claim-state"><CheckCircle aria-hidden weight="fill" />{reviewCase.claimed_by ? `Claimed (${reviewCase.claimed_by.slice(0, 12)}…)` : "Unassigned"}</p><label className="field"><span>Adjudication</span><select value={outcome} onChange={(event) => setOutcome(event.target.value as typeof outcome)}><option value="">Select a decision</option><option value="MALICIOUS">Malicious</option><option value="BENIGN">Benign</option><option value="INCONCLUSIVE">Inconclusive</option></select></label><label className="field"><span>Analyst note</span><textarea rows={7} maxLength={2000} value={note} onChange={(event) => setNote(event.target.value)} placeholder="Cite only evidence visible in this case." /></label>{actionError && <div className="alert alert-danger" role="alert"><WarningCircle aria-hidden />{actionError}</div>}<div className="stacked-actions"><button className="button button-secondary" type="button" disabled={busy || !note.trim()} onClick={() => act({ action: "annotate", note: note.trim() })}>Add note</button><button className="button button-primary" type="button" disabled={busy || !outcome} onClick={() => outcome && act({ action: "adjudicate", outcome, note: note.trim() || undefined })}>{busy ? "Saving…" : "Record adjudication"}</button></div></aside></div>
+      {reviewCase.feedback && <section className="card review-feedback" aria-labelledby="submitted-feedback-title"><div className="section-heading"><div><p className="eyebrow">Quarantined user report</p><h2 id="submitted-feedback-title">Submitted feedback</h2></div><span className="badge badge-neutral">{reviewCase.feedback.status.replaceAll("_", " ")}</span></div><dl><div><dt>Category</dt><dd>{reviewCase.feedback.category.replaceAll("_", " ")}</dd></div><div><dt>Submitted</dt><dd>{formatDate(reviewCase.feedback.created_at)}</dd></div><div><dt>Research eligibility</dt><dd>{reviewCase.feedback.research_consent ? "Consent recorded; adjudication still required" : "Excluded—no consent"}</dd></div></dl><p>{reviewCase.feedback.comment || "No supporting comment was provided."}</p><small>Feedback cannot alter a result or enter training data without independent adjudication.</small></section>}
+      {scan ? <><div className="card case-url"><span>{revealedUrl ? "Original submitted URL — sensitive" : "Redacted submitted URL"}</span><code>{defangUrl(revealedUrl || scan.display_url)}</code>{revealedUrl && <div className="alert alert-warning"><WarningCircle aria-hidden />Do not open this target. The reveal was recorded in the audit chain.</div>}<div><RiskBadge risk={scan.decision.risk_band} /><StatusBadge status={scan.status} /><span className="badge badge-neutral">{scan.decision.analysis_scope.replaceAll("_", " ")}</span></div></div><ResultSection title="Stored decision reasons" icon={Fingerprint} count={scan.decision.reasons.length} open>{scan.decision.reasons.length ? <ul className="finding-list">{scan.decision.reasons.map((reason, index) => <li key={reason}><span>{index + 1}</span><p>{reason}</p></li>)}</ul> : <p>No reason templates were stored for this decision.</p>}</ResultSection><ResultSection title="Pinned evidence" icon={Database} count={scan.decision.evidence.length} open>{scan.decision.evidence.length ? <div className="evidence-list">{scan.decision.evidence.map((item) => <EvidenceRow item={item} key={item.id} />)}</div> : <p>No evidence observations are exposed for this decision.</p>}</ResultSection></> : scanUnavailable && <div className="alert alert-warning"><WarningCircle aria-hidden /><span><strong>Scan evidence is unavailable.</strong>The case record remains accessible, but its linked scan could not be read.</span></div>}
+      <section className="card event-panel"><div className="section-heading"><div><p className="eyebrow">Append-only history</p><h2>Case events</h2></div><span className="badge badge-neutral">{reviewCase.events.length}</span></div>{reviewCase.events.length ? <ol className="event-list">{reviewCase.events.map((event) => <li key={event.id}><div><strong>{event.action.replaceAll("_", " ")}</strong><time dateTime={event.created_at}>{formatDate(event.created_at)}</time></div>{event.detail.outcome && <p>Outcome: {event.detail.outcome}</p>}{event.detail.note && <p>{event.detail.note}</p>}{event.detail.evidence_ids?.length ? <p>Cited evidence: {event.detail.evidence_ids.join(", ")}</p> : null}</li>)}</ol> : <p className="muted-copy">No case events have been recorded.</p>}</section>
+    </section><aside className="card review-panel"><h2>Record review action</h2><p className="claim-state"><CheckCircle aria-hidden weight="fill" />{isClosed ? "Adjudicated" : isMine ? "Claimed by you" : reviewCase.claimed_by ? `Claimed (${reviewCase.claimed_by.slice(0, 12)}…)` : "Unassigned"}</p>{!isMine && !isClosed && <div className="alert alert-info"><Info aria-hidden />Claim this case before revealing the URL or recording an adjudication.</div>}{isMine && !isClosed && <><label className="field"><span>Adjudication</span><select value={outcome} onChange={(event) => setOutcome(event.target.value as typeof outcome)}><option value="">Select a decision</option><option value="MALICIOUS">Malicious</option><option value="BENIGN">Benign</option><option value="INCONCLUSIVE">Inconclusive</option></select></label><label className="field"><span>Rationale</span><textarea rows={7} minLength={20} maxLength={2000} value={note} onChange={(event) => setNote(event.target.value)} placeholder="Explain how the cited evidence supports the decision." /><small className="character-count">{note.trim().length} / 20 minimum</small></label><fieldset className="citation-field"><legend>Cited decision evidence</legend>{scan?.decision.reasons.map((reason, index) => <label key={`reason:${index}`}><input type="checkbox" checked={evidenceIds.includes(`reason:${index}`)} onChange={() => toggleEvidence(`reason:${index}`)} /><span><strong>Decision reason {index + 1}</strong><small>{reason}</small></span></label>)}{scan?.decision.evidence.map((item) => <label key={item.id}><input type="checkbox" checked={evidenceIds.includes(item.id)} onChange={() => toggleEvidence(item.id)} /><span><strong>{evidenceName(item)}</strong><small>{item.id}</small></span></label>)}{!scan?.decision.reasons.length && !scan?.decision.evidence.length && <p>No citable decision evidence is available.</p>}</fieldset>{actionError && <div className="alert alert-danger" role="alert"><WarningCircle aria-hidden />{actionError}</div>}<div className="stacked-actions"><button className="button button-secondary" type="button" disabled={busy || !note.trim()} onClick={() => act({ action: "annotate", note: note.trim() })}>Add note</button><button className="button button-primary" type="button" disabled={busy || !outcome || note.trim().length < 20 || evidenceIds.length === 0} onClick={() => outcome && act({ action: "adjudicate", outcome, note: note.trim(), evidence_ids: evidenceIds })}>{busy ? "Saving…" : "Record adjudication"}</button></div></>}</aside></div>
+    {pendingSensitiveAction && <FreshAuthDialog action={pendingSensitiveAction} close={() => setPendingSensitiveAction(null)} />}
   </div>;
 }
 
@@ -1151,7 +1400,13 @@ function AdminOverview() {
   const canonicalStatus = health.canonical_admin?.status;
   const canonicalLabel = canonicalStatus === "CONFIGURED" ? "Configured" : canonicalStatus === "MISSING" ? "Missing" : "Not reported";
   const canonicalDetail = health.canonical_admin ? `${health.canonical_admin.count} canonical administrator record` : "Older health contract";
-  return <><div className="metric-grid four"><Metric label="Database" value={health.database} detail="API connectivity check" icon={HardDrives} /><Metric label="Recorded jobs" value={String(jobTotal)} detail="Across persisted states" icon={ListChecks} /><Metric label="Job states" value={String(Object.keys(health.jobs).length)} detail={`Checked ${formatDate(health.checked_at)}`} icon={SlidersHorizontal} /><Metric label="Canonical admin" value={canonicalLabel} detail={canonicalDetail} icon={UsersThree} /></div><section className="card admin-table-section"><div className="section-heading"><div><p className="eyebrow">PostgreSQL queue</p><h2>Jobs by state</h2></div></div>{Object.keys(health.jobs).length ? <dl className="version-list">{Object.entries(health.jobs).sort().map(([state, count]) => <div key={state}><dt>{state.replaceAll("_", " ")}</dt><dd>{count}</dd></div>)}</dl> : <p className="muted-copy">No persisted scan jobs were reported.</p>}<div className={`alert ${canonicalStatus === "MISSING" ? "alert-danger" : "alert-info"}`}><Info aria-hidden /><span><strong>Canonical administrator: {canonicalLabel}.</strong>{canonicalStatus === "MISSING" ? "Bootstrap an administrator before relying on in-app governance." : canonicalStatus === "CONFIGURED" ? "The protected bootstrap identity is present." : "Upgrade the backend to expose the canonical administrator check."}</span></div></section></>;
+  const provider = health.provider_telemetry?.google_web_risk;
+  return <><div className="metric-grid four"><Metric label="Database" value={health.database} detail="API connectivity check" icon={HardDrives} /><Metric label="Recorded jobs" value={String(jobTotal)} detail="Across persisted states" icon={ListChecks} /><Metric label="Decisions (7 d)" value={String(health.decisions_7d ?? 0)} detail="Latest decision per analysis run" icon={ShieldCheck} /><Metric label="Active sessions" value={String(health.active_user_sessions ?? 0)} detail={`Checked ${formatDate(health.checked_at)}`} icon={UsersThree} /></div><div className="admin-grid"><section className="card"><div className="section-heading"><div><p className="eyebrow">PostgreSQL queue</p><h2>Jobs by state</h2></div></div><DistributionList entries={health.jobs} empty="No persisted scan jobs were reported." /></section><section className="card"><div className="section-heading"><div><p className="eyebrow">Latest run decision</p><h2>Scan outcomes (7 days)</h2></div></div><DistributionList entries={health.outcomes_7d ?? {}} empty="No decisions were recorded in this period." /></section><section className="card"><div className="section-heading"><div><p className="eyebrow">Observed provenance</p><h2>Decisions by model version</h2></div></div><DistributionList entries={health.model_versions_7d ?? {}} empty="No model-version observations were recorded." /></section><section className="card"><div className="section-heading"><div><p className="eyebrow">Google Web Risk</p><h2>Provider outcomes</h2></div><span className="badge badge-neutral">{provider?.observations_7d ?? 0} checks</span></div><DistributionList entries={provider?.states ?? {}} empty="No provider observations were recorded in this period." />{provider?.last_retrieved_at && <p className="muted-copy">Last retrieved {formatDate(provider.last_retrieved_at)}</p>}</section></div><div className={`alert admin-health-alert ${canonicalStatus === "MISSING" ? "alert-danger" : "alert-info"}`}><Info aria-hidden /><span><strong>Canonical administrator: {canonicalLabel}.</strong>{canonicalStatus === "MISSING" ? "Bootstrap an administrator before relying on in-app governance." : canonicalStatus === "CONFIGURED" ? `${canonicalDetail}; the protected trust anchor is present.` : "Upgrade the backend to expose the canonical administrator check."}</span></div></>;
+}
+
+function DistributionList({ entries, empty }: { entries: Record<string, number>; empty: string }) {
+  const total = Object.values(entries).reduce((sum, value) => sum + value, 0);
+  return Object.keys(entries).length ? <dl className="distribution-list">{Object.entries(entries).sort((left, right) => right[1] - left[1]).map(([label, value]) => <div key={label}><dt><span>{label.replaceAll("_", " ")}</span><small>{value}</small></dt><dd><span style={{ width: `${total ? Math.max(3, value / total * 100) : 0}%` }} /></dd></div>)}</dl> : <p className="muted-copy">{empty}</p>;
 }
 
 function AdminUsers({ runSensitive }: { runSensitive: SensitiveActionRunner }) {
@@ -1172,8 +1427,10 @@ function AdminUserRow({ user, update, runSensitive, canManageAdministrators }: {
   const [disabled, setDisabled] = useState(user.disabled);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   async function save() { setBusy(true); setError(""); try { await runSensitive(async () => { const result = await api.updateAdminUser(user.id, role, disabled); update(result); }); } catch (reason) { setError(apiMessage(reason, "The user could not be updated.")); } finally { setBusy(false); } }
-  return <article className="governance-row"><div><strong className="mono">{user.id}</strong><small>Created {formatDate(user.created_at)} · email {user.email_verified ? "verified" : "not verified"} · MFA {user.mfa_verified ? "verified" : "not verified"}</small>{user.role_request?.state === "PENDING" && <small>Pending request: {roleLabel(user.role_request.requested_role)}</small>}</div>{editable ? <><label><span className="sr-only">Role for {user.id}</span><select value={role} onChange={(event) => setRole(event.target.value as AssignableRole)}><option value="REGISTERED_USER">Registered user</option><option value="ANALYST">Analyst</option><option value="RESEARCHER">Researcher</option><option value="ADMINISTRATOR">Administrator</option></select></label><label className="checkbox-row compact-checkbox"><input type="checkbox" checked={disabled} onChange={(event) => setDisabled(event.target.checked)} /> Disabled</label><button className="button button-secondary button-small" type="button" disabled={busy} onClick={save}>{busy ? "Saving…" : "Save"}</button></> : <><span className="badge badge-neutral">{user.is_canonical_admin ? "Canonical administrator" : "Administrator"}</span><small>{user.is_canonical_admin ? "Immutable in application UI" : "Canonical administrator approval required"}</small></>}{error && <div className="alert alert-danger row-alert" role="alert"><WarningCircle aria-hidden />{error}</div>}</article>;
+  async function revokeSessions() { setBusy(true); setError(""); setNotice(""); try { await runSensitive(async () => { const result = await api.revokeUserSessions(user.id); setNotice(`${result.revoked_session_count} active session${result.revoked_session_count === 1 ? "" : "s"} revoked.`); }); } catch (reason) { setError(apiMessage(reason, "Sessions could not be revoked.")); } finally { setBusy(false); } }
+  return <article className="governance-row"><div><strong className="mono">{user.id}</strong><small>Created {formatDate(user.created_at)} · email {user.email_verified ? "verified" : "not verified"} · MFA {user.mfa_verified ? "verified" : "not verified"}</small>{user.role_request?.state === "PENDING" && <small>Pending request: {roleLabel(user.role_request.requested_role)}</small>}</div>{editable ? <><label><span className="sr-only">Role for {user.id}</span><select value={role} onChange={(event) => setRole(event.target.value as AssignableRole)}><option value="REGISTERED_USER">Registered user</option><option value="ANALYST">Analyst</option><option value="RESEARCHER">Researcher</option><option value="ADMINISTRATOR">Administrator</option></select></label><label className="checkbox-row compact-checkbox"><input type="checkbox" checked={disabled} onChange={(event) => setDisabled(event.target.checked)} /> Disabled</label><div className="row-actions"><button className="button button-secondary button-small" type="button" disabled={busy} onClick={revokeSessions}>Revoke sessions</button><button className="button button-primary button-small" type="button" disabled={busy} onClick={save}>{busy ? "Saving…" : "Save"}</button></div></> : <><span className="badge badge-neutral">{user.is_canonical_admin ? "Canonical administrator" : "Administrator"}</span><small>{user.is_canonical_admin ? "Immutable in application UI" : "Canonical administrator approval required"}</small></>}{notice && <div className="alert alert-success row-alert" role="status"><CheckCircle aria-hidden />{notice}</div>}{error && <div className="alert alert-danger row-alert" role="alert"><WarningCircle aria-hidden />{error}</div>}</article>;
 }
 
 function AdminRoleRequests({ runSensitive }: { runSensitive: SensitiveActionRunner }) {
@@ -1211,36 +1468,53 @@ function AdminRoleRequests({ runSensitive }: { runSensitive: SensitiveActionRunn
 
 function AdminProviders({ runSensitive }: { runSensitive: SensitiveActionRunner }) {
   const [providers, setProviders] = useState<ProviderConfiguration[] | null>(null);
+  const [telemetry, setTelemetry] = useState<AdminHealth["provider_telemetry"]>();
   const [error, setError] = useState("");
   const [busy, setBusy] = useState("");
-  function load() { setProviders(null); setError(""); api.listProviders().then(setProviders).catch((reason) => setError(apiMessage(reason, "Provider configuration could not be loaded."))); }
+  function load() { setProviders(null); setError(""); Promise.all([api.listProviders(), api.getAdminHealth()]).then(([items, health]) => { setProviders(items); setTelemetry(health.provider_telemetry); }).catch((reason) => setError(apiMessage(reason, "Provider configuration could not be loaded."))); }
   useEffect(load, []);
   async function toggle(provider: ProviderConfiguration) { setBusy(provider.provider); setError(""); try { await runSensitive(async () => { const next = await api.updateProvider(provider.provider, !provider.enabled, provider.config); setProviders((items) => items?.map((item) => item.provider === next.provider ? next : item) ?? [next]); }); } catch (reason) { setError(apiMessage(reason, "Provider configuration could not be changed.")); } finally { setBusy(""); } }
   if (!providers && !error) return <div className="skeleton skeleton-panel" aria-label="Loading providers" />;
-  return <section className="card admin-table-section"><div className="section-heading"><div><h2>Runtime reputation providers</h2><p>Only persisted provider configuration is shown. Health and quota telemetry are unavailable.</p></div></div>{error && <div className="alert alert-danger" role="alert"><WarningCircle aria-hidden />{error}</div>}{providers?.length ? <div className="governance-list">{providers.map((provider) => <article className="governance-row" key={provider.id}><div><strong>{provider.provider.replaceAll("_", " ")}</strong><small>Updated {formatDate(provider.updated_at)} · {Object.keys(provider.config).length} non-secret configuration fields</small></div><span className={`badge ${provider.enabled ? "badge-low" : "badge-neutral"}`}>{provider.enabled ? "Enabled" : "Disabled"}</span><button className="button button-secondary button-small" type="button" disabled={busy === provider.provider} onClick={() => toggle(provider)}>{busy === provider.provider ? "Saving…" : provider.enabled ? "Disable" : "Enable"}</button></article>)}</div> : !error && <WorkspaceEmpty title="No persisted provider configuration" detail="The API returned no provider records. Runtime defaults are intentionally not inferred." />}</section>;
+  return <section className="card admin-table-section"><div className="section-heading"><div><h2>Runtime reputation providers</h2><p>Persisted controls and URL-free outcomes from the last seven days.</p></div></div>{error && <div className="alert alert-danger" role="alert"><WarningCircle aria-hidden />{error}</div>}{providers?.length ? <div className="governance-list">{providers.map((provider) => { const status = telemetry?.[provider.provider]; return <article className="provider-row" key={provider.id}><div><strong>{provider.provider.replaceAll("_", " ")}</strong><small>Updated {formatDate(provider.updated_at)} · {Object.keys(provider.config).length} non-secret configuration fields</small></div><div><span className={`badge ${provider.enabled ? "badge-low" : "badge-neutral"}`}>{provider.enabled ? "Enabled" : "Disabled"}</span><button className="button button-secondary button-small" type="button" disabled={busy === provider.provider} onClick={() => toggle(provider)}>{busy === provider.provider ? "Saving…" : provider.enabled ? "Disable" : "Enable"}</button></div><div className="provider-stats"><span><strong>{status?.observations_7d ?? 0}</strong><small>Checks (7 d)</small></span><span><strong>{status ? Object.values(status.states).reduce((sum, count) => sum + count, 0) : 0}</strong><small>Recorded outcomes</small></span><span><strong>{status?.last_retrieved_at ? formatDate(status.last_retrieved_at) : "Never"}</strong><small>Last retrieval</small></span></div><DistributionList entries={status?.states ?? {}} empty="No outcomes recorded." /></article>; })}</div> : !error && <WorkspaceEmpty title="No persisted provider configuration" detail="The API returned no provider records. Runtime defaults are intentionally not inferred." />}</section>;
 }
 
 function AdminReleases({ runSensitive }: { runSensitive: SensitiveActionRunner }) {
   const [policies, setPolicies] = useState<DecisionPolicy[] | null>(null);
   const [models, setModels] = useState<ModelRelease[] | null>(null);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState("");
+  const [policyVersion, setPolicyVersion] = useState("");
+  const [policyConfig, setPolicyConfig] = useState('{\n  "low_threshold": 0.35,\n  "high_threshold": 0.7\n}');
+  const [modelVersion, setModelVersion] = useState("");
+  const [artifactUri, setArtifactUri] = useState("");
+  const [sha256, setSha256] = useState("");
+  const [modelMetrics, setModelMetrics] = useState('{\n  "recall": 0.9,\n  "false_positive_rate": 0.05,\n  "pr_auc": 0.9,\n  "expected_calibration_error": 0.1\n}');
+  const [gates, setGates] = useState({ data: false, feature: false, evaluation: false, security: false });
   function load() { setPolicies(null); setModels(null); setError(""); Promise.all([api.listDecisionPolicies(), api.listModels()]).then(([nextPolicies, nextModels]) => { setPolicies(nextPolicies); setModels(nextModels); }).catch((reason) => setError(apiMessage(reason, "Policy and model registries could not be loaded."))); }
   useEffect(load, []);
-  async function activate(model: ModelRelease) { setBusy(model.id); setError(""); try { await runSensitive(async () => { const next = await api.activateModel(model.id); setModels((items) => items?.map((item) => item.id === next.id ? next : { ...item, approved_for_deployment: false }) ?? [next]); }); } catch (reason) { setError(apiMessage(reason, "The model approval could not be changed.")); } finally { setBusy(""); } }
+  async function createPolicy(event: FormEvent) { event.preventDefault(); setBusy("policy-create"); setError(""); setNotice(""); try { const config = parseJsonObject(policyConfig, "Policy configuration"); await runSensitive(async () => { const created = await api.createDecisionPolicy(policyVersion, config); setPolicies((items) => [created, ...(items ?? [])]); setPolicyVersion(""); setNotice(`Policy ${created.version} registered.`); }); } catch (reason) { setError(apiMessage(reason, reason instanceof Error ? reason.message : "The policy could not be registered.")); } finally { setBusy(""); } }
+  async function approvePolicy(policy: DecisionPolicy) { setBusy(policy.id); setError(""); setNotice(""); try { await runSensitive(async () => { const next = await api.activateDecisionPolicy(policy.id); setPolicies((items) => items?.map((item) => item.id === next.id ? next : { ...item, active: false }) ?? [next]); setNotice(`${policy.version} approved as the deployment policy pointer.`); }); } catch (reason) { setError(apiMessage(reason, "The policy approval could not be changed.")); } finally { setBusy(""); } }
+  async function registerModel(event: FormEvent) { event.preventDefault(); setBusy("model-create"); setError(""); setNotice(""); try { const metrics = { ...parseJsonObject(modelMetrics, "Model metrics"), gates }; await runSensitive(async () => { const created = await api.registerModel(modelVersion, artifactUri, sha256, metrics); setModels((items) => [created, ...(items ?? [])]); setModelVersion(""); setArtifactUri(""); setSha256(""); setNotice(`Model ${created.version} registered for governance review.`); }); } catch (reason) { setError(apiMessage(reason, reason instanceof Error ? reason.message : "The model could not be registered.")); } finally { setBusy(""); } }
+  async function activate(model: ModelRelease) { setBusy(model.id); setError(""); setNotice(""); try { await runSensitive(async () => { const next = await api.activateModel(model.id); setModels((items) => items?.map((item) => item.id === next.id ? next : { ...item, approved_for_deployment: false }) ?? [next]); setNotice(`${model.version} approved. Deploy its checksum-pinned overlay before it can affect runtime decisions.`); }); } catch (reason) { setError(apiMessage(reason, "The model approval could not be changed.")); } finally { setBusy(""); } }
   if ((!policies || !models) && !error) return <div className="skeleton skeleton-panel" aria-label="Loading release registries" />;
   if (error && !policies && !models) return <WorkspaceFailure message={error} retry={load} />;
-  return <><div className="alert alert-warning"><WarningCircle aria-hidden /><span><strong>Approval is not runtime activation.</strong>A trusted checksum-pinned deployment is still required before a model or policy affects decisions.</span></div>{error && <div className="alert alert-danger" role="alert"><WarningCircle aria-hidden />{error}</div>}<div className="admin-grid registry-grid"><section className="card"><div className="section-heading"><div><h2>Decision policies</h2><p>Read-only registry view</p></div></div>{policies?.length ? <div className="governance-list">{policies.map((policy) => <article className="registry-row" key={policy.id}><div><strong>{policy.version}</strong><small>{formatDate(policy.created_at)} · {Object.keys(policy.config).length} configuration fields</small></div><span className={`badge ${policy.active ? "badge-low" : "badge-neutral"}`}>{policy.active ? "Registry active" : "Inactive"}</span></article>)}</div> : <p className="muted-copy">No policy records were returned. Policy creation is not exposed because runtime policy constants require a reviewed deployment.</p>}</section><section className="card"><div className="section-heading"><div><h2>Model releases</h2><p>Checksum and deployment metadata</p></div></div>{models?.length ? <div className="governance-list">{models.map((model) => <article className="registry-row" key={model.id}><div><strong>{model.version}</strong><small className="mono">SHA-256 {model.sha256.slice(0, 16)}…</small><small className="mono truncate">{model.artifact_uri}</small></div>{model.approved_for_deployment ? <span className="badge badge-low">Approved for deployment</span> : <button className="button button-secondary button-small" type="button" disabled={busy === model.id} onClick={() => activate(model)}>{busy === model.id ? "Saving…" : "Approve for deployment"}</button>}</article>)}</div> : <p className="muted-copy">No model releases were returned. Artifact registration is handled outside this UI.</p>}</section></div></>;
+  const activeModel = models?.find((model) => model.approved_for_deployment);
+  return <><div className="alert alert-warning"><WarningCircle aria-hidden /><span><strong>Approval is not runtime activation.</strong>A trusted checksum-pinned deployment is still required before a model or policy affects decisions.</span></div>{notice && <div className="alert alert-success release-notice" role="status"><CheckCircle aria-hidden />{notice}</div>}{error && <div className="alert alert-danger release-notice" role="alert"><WarningCircle aria-hidden />{error}</div>}<div className="release-columns"><section className="card release-panel"><div className="section-heading"><div><h2>Decision policies</h2><p>Register immutable configuration, then approve a deployment pointer.</p></div></div><form className="compact-form" onSubmit={createPolicy}><label className="field"><span>Version</span><input required pattern="[A-Za-z0-9._-]{1,64}" value={policyVersion} onChange={(event) => setPolicyVersion(event.target.value)} placeholder="policy-2026.08" /></label><label className="field"><span>Configuration JSON</span><textarea rows={5} required value={policyConfig} onChange={(event) => setPolicyConfig(event.target.value)} /></label><button className="button button-primary" disabled={busy === "policy-create"}>{busy === "policy-create" ? "Registering…" : "Register policy"}</button></form>{policies?.length ? <div className="governance-list release-list">{policies.map((policy) => <article className="registry-row" key={policy.id}><div><strong>{policy.version}</strong><small>{formatDate(policy.created_at)} · {Object.keys(policy.config).length} configuration fields</small></div>{policy.active ? <span className="badge badge-low">Deployment pointer</span> : <button className="button button-secondary button-small" type="button" disabled={busy === policy.id} onClick={() => approvePolicy(policy)}>{busy === policy.id ? "Saving…" : "Approve / roll back"}</button>}</article>)}</div> : <p className="muted-copy">No policy records were returned.</p>}</section><section className="card release-panel"><div className="section-heading"><div><h2>Model releases</h2><p>Register checksum-pinned artifacts and record every governance gate.</p></div></div><form className="compact-form" onSubmit={registerModel}><div className="form-pair"><label className="field"><span>Version</span><input required pattern="[A-Za-z0-9._-]{1,128}" value={modelVersion} onChange={(event) => setModelVersion(event.target.value)} placeholder="url-logistic-1.1" /></label><label className="field"><span>Artifact URI</span><input required value={artifactUri} onChange={(event) => setArtifactUri(event.target.value)} placeholder="gs://bucket/model.joblib" /></label></div><label className="field"><span>SHA-256</span><input className="mono" required pattern="[0-9a-f]{64}" minLength={64} maxLength={64} value={sha256} onChange={(event) => setSha256(event.target.value.toLowerCase())} /></label><label className="field"><span>Evaluation metrics JSON</span><textarea rows={5} required value={modelMetrics} onChange={(event) => setModelMetrics(event.target.value)} /></label><fieldset className="gate-checks"><legend>Governance gate evidence</legend>{Object.keys(gates).map((gate) => <label key={gate}><input type="checkbox" checked={gates[gate as keyof typeof gates]} onChange={(event) => setGates((current) => ({ ...current, [gate]: event.target.checked }))} />{roleLabel(gate)} gate passed</label>)}</fieldset><button className="button button-primary" disabled={busy === "model-create"}>{busy === "model-create" ? "Registering…" : "Register model"}</button></form>{models?.length ? <div className="governance-list release-list">{models.map((model) => { const modelGates = model.metrics.gates && typeof model.metrics.gates === "object" ? model.metrics.gates as Record<string, unknown> : {}; return <article className="model-release" key={model.id}><div><strong>{model.version}</strong><small className="mono">SHA-256 {model.sha256.slice(0, 16)}…</small><small className="mono">{model.artifact_uri}</small></div><div className="model-gates">{["data", "feature", "evaluation", "security"].map((gate) => <span className={`badge ${modelGates[gate] === true ? "badge-low" : "badge-high"}`} key={gate}>{modelGates[gate] === true ? <Check aria-hidden /> : <XCircle aria-hidden />}{gate}</span>)}</div>{model.approved_for_deployment ? <span className="badge badge-low">Approved for deployment</span> : <button className="button button-secondary button-small" type="button" disabled={busy === model.id} onClick={() => activate(model)}>{busy === model.id ? "Saving…" : activeModel ? "Approve as rollback / replacement" : "Approve for deployment"}</button>}</article>; })}</div> : <p className="muted-copy">No model releases were returned.</p>}</section></div></>;
 }
 
 function AdminAudit() {
   const [events, setEvents] = useState<AuditEvent[] | null>(null);
   const [error, setError] = useState("");
-  function load() { setEvents(null); setError(""); api.listAuditEvents().then(setEvents).catch((reason) => setError(apiMessage(reason, "Audit events could not be loaded."))); }
+  const [query, setQuery] = useState("");
+  const [verification, setVerification] = useState<{ valid: boolean; checked_events: number; failed_event_id: string | null; head_hmac: string | null; verified_at: string } | null>(null);
+  const [verifying, setVerifying] = useState(false);
+  function load(search = query) { setEvents(null); setError(""); api.listAuditEvents(search).then(setEvents).catch((reason) => setError(apiMessage(reason, "Audit events could not be loaded."))); }
   useEffect(load, []);
+  async function verify() { setVerifying(true); setError(""); try { setVerification(await api.verifyAuditEvents()); } catch (reason) { setError(apiMessage(reason, "The audit chain could not be verified.")); } finally { setVerifying(false); } }
   if (!events && !error) return <div className="skeleton skeleton-panel" aria-label="Loading audit events" />;
   if (error) return <WorkspaceFailure message={error} retry={load} />;
-  return <section className="card admin-table-section"><div className="section-heading"><div><h2>Audit events</h2><p>Latest 200 persisted privileged events. Digest export is not available from the current API.</p></div></div>{events?.length ? <ol className="event-list audit-list">{events.map((event) => <li key={event.id}><div><strong>{event.action.replaceAll("_", " ")}</strong><time dateTime={event.created_at}>{formatDate(event.created_at)}</time></div><p>{event.object_type}{event.object_id ? ` · ${event.object_id}` : ""} · {event.outcome}</p><small className="mono">Correlation {event.correlation_id}</small></li>)}</ol> : <p className="muted-copy">No audit events were returned.</p>}</section>;
+  return <><div className="toolbar card"><form className="search-field" onSubmit={(event) => { event.preventDefault(); load(query); }}><MagnifyingGlass aria-hidden /><input aria-label="Search audit events" maxLength={100} placeholder="Search action, object, outcome, or correlation ID" value={query} onChange={(event) => setQuery(event.target.value)} /></form><button className="button button-secondary" type="button" onClick={verify} disabled={verifying}><ShieldCheck aria-hidden />{verifying ? "Verifying…" : "Verify hash chain"}</button></div>{verification && <div className={`alert ${verification.valid ? "alert-success" : "alert-danger"} audit-verification`} role="status">{verification.valid ? <CheckCircle aria-hidden /> : <XCircle aria-hidden />}<span><strong>{verification.valid ? "Audit chain verified." : "Audit chain verification failed."}</strong>{verification.checked_events} events checked at {formatDate(verification.verified_at)}{verification.failed_event_id ? ` · first failure ${verification.failed_event_id}` : ""}{verification.head_hmac ? <small className="mono">Head HMAC {verification.head_hmac}</small> : null}</span></div>}<section className="card admin-table-section"><div className="section-heading"><div><h2>Audit events</h2><p>Latest 200 matching privileged events with chain provenance.</p></div></div>{events?.length ? <ol className="event-list audit-list">{events.map((event) => <li key={event.id}><div><strong>{event.action.replaceAll("_", " ")}</strong><time dateTime={event.created_at}>{formatDate(event.created_at)}</time></div><p>{event.object_type}{event.object_id ? ` · ${event.object_id}` : ""} · {event.outcome}</p><small className="mono">Correlation {event.correlation_id}</small>{event.event_hmac && <details><summary>Chain hashes</summary><code>Previous: {event.previous_hmac ?? "genesis"}{"\n"}Event: {event.event_hmac}</code></details>}</li>)}</ol> : <p className="muted-copy">No audit events matched this search.</p>}</section></>;
 }
 
 function ResearchPage() {
@@ -1248,20 +1522,105 @@ function ResearchPage() {
   const [experiments, setExperiments] = useState<Experiment[] | null>(null);
   const [exports, setExports] = useState<ResearchExport[] | null>(null);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [tab, setTab] = useState<"Datasets" | "Experiments" | "Results" | "Model cards" | "Exports">("Datasets");
+  const [pendingAction, setPendingAction] = useState<(() => Promise<void>) | null>(null);
   function load() { setDatasets(null); setExperiments(null); setExports(null); setError(""); Promise.all([api.listDatasets(), api.listExperiments(), api.listResearchExports()]).then(([nextDatasets, nextExperiments, nextExports]) => { setDatasets(nextDatasets); setExperiments(nextExperiments); setExports(nextExports); }).catch((reason) => setError(apiMessage(reason, "Research records could not be loaded."))); }
   useEffect(load, []);
   if ((!datasets || !experiments || !exports) && !error) return <div className="page workspace-page"><div className="skeleton skeleton-panel" aria-label="Loading research workspace" /></div>;
   if (error) return <div className="page workspace-page"><PageHeader eyebrow="Research workspace" title="Datasets and experiments" description="Inspect persisted research governance records." /><WorkspaceFailure message={error} retry={load} /></div>;
   if (!datasets || !experiments || !exports) return null;
-  return <div className="page workspace-page"><PageHeader eyebrow="Research workspace" title="Datasets and experiments" description="Inspect persisted research governance records without implying that queued work has run." actions={<button className="button button-secondary" type="button" onClick={load}>Refresh</button>} /><div className="alert alert-warning"><WarningCircle aria-hidden /><span><strong>Experimental, read-only workflow.</strong>The API can record queued experiments and exports, but no executor is deployed. Creation is therefore unavailable in this interface.</span></div><div className="metric-grid"><Metric label="Dataset records" value={String(datasets.length)} detail="Returned by the registry" icon={Database} /><Metric label="Experiment records" value={String(experiments.length)} detail="States are not inferred" icon={Flask} /><Metric label="Export records" value={String(exports.length)} detail="Artifact presence is reported" icon={FileText} /></div><div className="research-grid"><ResearchDatasets items={datasets} /><ResearchExperiments items={experiments} /></div><section className="card admin-table-section research-exports"><div className="section-heading"><div><h2>Governed exports</h2><p>Existing requests only; new requests are disabled until an executor is deployed.</p></div></div>{exports.length ? <div className="governance-list">{exports.map((item) => <article className="registry-row" key={item.id}><div><strong className="mono">{item.id}</strong><small>{item.expires_at ? `Expires ${formatDate(item.expires_at)}` : "No expiry recorded"}</small></div><span className="badge badge-neutral">{item.state.replaceAll("_", " ")}</span><small>{item.artifact_uri ? "Artifact recorded" : "No artifact recorded"}</small></article>)}</div> : <p className="muted-copy">No export records were returned.</p>}</section></div>;
+  const tabs = ["Datasets", "Experiments", "Results", "Model cards", "Exports"] as const;
+  const runSensitive: SensitiveActionRunner = async (action) => {
+    try { await action(); } catch (reason) {
+      if (reason instanceof ApiError && reason.code === "fresh_auth_required") { setPendingAction(() => action); return; }
+      throw reason;
+    }
+  };
+  return (
+    <div className="page workspace-page">
+      <PageHeader
+        eyebrow="Research workspace"
+        title="Research and evaluation"
+        description="Create frozen records, run the on-demand evaluator, inspect measured outputs, and request governed exports."
+        actions={<button className="button button-secondary" type="button" onClick={load}>Refresh</button>}
+      />
+      {notice && <div className="alert alert-success research-notice" role="status"><CheckCircle aria-hidden />{notice}</div>}
+      <div className="metric-grid">
+        <Metric label="Dataset snapshots" value={String(datasets.length)} detail="Frozen registry records" icon={Database} />
+        <Metric label="Experiments" value={String(experiments.length)} detail={`${experiments.filter((item) => item.state === "COMPLETE").length} complete`} icon={Flask} />
+        <Metric label="Governed exports" value={String(exports.length)} detail={`${exports.filter((item) => Boolean(item.artifact_uri)).length} artifacts available`} icon={FileText} />
+      </div>
+      <div className="tabs" aria-label="Research sections">
+        {tabs.map((item) => <button type="button" className={tab === item ? "active" : ""} key={item} onClick={() => setTab(item)}>{item}</button>)}
+      </div>
+      {tab === "Datasets" ? (
+        <ResearchDatasets items={datasets} add={(item) => {
+          setDatasets((current) => [item, ...(current ?? [])]);
+          setNotice(`Dataset snapshot ${item.name} registered.`);
+        }} />
+      ) : tab === "Experiments" ? (
+        <ResearchExperiments items={experiments} datasets={datasets} add={(item) => {
+          setExperiments((current) => [item, ...(current ?? [])]);
+          setNotice(`Experiment ${item.id} queued. Run make evaluate-next against the cluster to execute it.`);
+        }} />
+      ) : tab === "Results" ? (
+        <ResearchResults items={experiments} />
+      ) : tab === "Model cards" ? (
+        <ResearchModelCards items={experiments} />
+      ) : (
+        <ResearchExports items={exports} runSensitive={runSensitive} add={(item) => {
+          setExports((current) => [item, ...(current ?? [])]);
+          setNotice(`Governed export ${item.id} queued.`);
+        }} />
+      )}
+      {pendingAction && <FreshAuthDialog action={pendingAction} close={() => setPendingAction(null)} />}
+    </div>
+  );
 }
 
-function ResearchDatasets({ items }: { items: DatasetSnapshot[] }) {
-  return <section className="card"><div className="section-heading"><div><p className="eyebrow">Immutable inputs</p><h2>Dataset snapshots</h2></div></div>{items.length ? <div className="dataset-list">{items.map((item) => <div key={item.id}><span className="dataset-icon"><Database aria-hidden /></span><span><strong>{item.name}</strong><small>Created {formatDate(item.created_at)}</small></span><span><strong>{item.state.replaceAll("_", " ")}</strong><small className="mono">{item.sha256.slice(0, 16)}…</small></span></div>)}</div> : <p className="muted-copy">No dataset snapshots were returned.</p>}</section>;
+function ResearchDatasets({ items, add }: { items: DatasetSnapshot[]; add: (item: DatasetSnapshot) => void }) {
+  const [name, setName] = useState("");
+  const [sha256, setSha256] = useState("");
+  const [manifest, setManifest] = useState('{\n  "artifact_path": "input.csv",\n  "source": "OpenPhish Academic + Tranco",\n  "license_reviewed": false,\n  "label_provenance_reviewed": false\n}');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function submit(event: FormEvent) { event.preventDefault(); setBusy(true); setError(""); try { const created = await api.createDataset(name, sha256, parseJsonObject(manifest, "Dataset manifest")); add(created); setName(""); setSha256(""); } catch (reason) { setError(apiMessage(reason, reason instanceof Error ? reason.message : "The dataset snapshot could not be registered.")); } finally { setBusy(false); } }
+  return <div className="research-workspace"><form className="card research-form" onSubmit={submit}><div className="section-heading"><div><p className="eyebrow">Immutable input</p><h2>Register a dataset snapshot</h2><p>The mounted CSV is checksum-verified before evaluation.</p></div></div><div className="form-pair"><label className="field"><span>Name</span><input required value={name} onChange={(event) => setName(event.target.value)} placeholder="openphish-tranco-2026-07" /></label><label className="field"><span>SHA-256</span><input className="mono" required pattern="[0-9a-f]{64}" value={sha256} onChange={(event) => setSha256(event.target.value.toLowerCase())} /></label></div><label className="field"><span>Manifest JSON</span><textarea required rows={7} value={manifest} onChange={(event) => setManifest(event.target.value)} /></label>{error && <div className="alert alert-danger" role="alert"><WarningCircle aria-hidden />{error}</div>}<button className="button button-primary" disabled={busy}>{busy ? "Registering…" : "Register frozen snapshot"}</button></form><section className="card research-records"><div className="section-heading"><div><p className="eyebrow">Immutable inputs</p><h2>Dataset snapshots</h2></div></div>{items.length ? <div className="dataset-list">{items.map((item) => <div key={item.id}><span className="dataset-icon"><Database aria-hidden /></span><span><strong>{item.name}</strong><small>Created {formatDate(item.created_at)}</small></span><span><strong>{item.state.replaceAll("_", " ")}</strong><small className="mono">{item.sha256.slice(0, 16)}…</small></span><details><summary>Manifest</summary><pre>{JSON.stringify(item.manifest, null, 2)}</pre></details></div>)}</div> : <p className="muted-copy">No dataset snapshots were returned.</p>}</section></div>;
 }
 
-function ResearchExperiments({ items }: { items: Experiment[] }) {
-  return <section className="card"><div className="section-heading"><div><p className="eyebrow">Recorded runs</p><h2>Experiments</h2></div></div>{items.length ? <div className="experiment-list">{items.map((item) => <div key={item.id}><span className={`experiment-icon ${item.state === "QUEUED" ? "running" : ""}`}>{item.state === "QUEUED" ? <Pulse aria-hidden /> : <Flask aria-hidden />}</span><span><strong className="mono">{item.id}</strong><small>{item.state.replaceAll("_", " ")} · dataset {item.dataset_id} · {formatDate(item.created_at)}</small></span></div>)}</div> : <p className="muted-copy">No experiment records were returned.</p>}</section>;
+function ResearchExperiments({ items, datasets, add }: { items: Experiment[]; datasets: DatasetSnapshot[]; add: (item: Experiment) => void }) {
+  const [datasetId, setDatasetId] = useState(datasets[0]?.id ?? "");
+  const [config, setConfig] = useState('{\n  "seed": 20250722,\n  "max_expected_calibration_error": 0.1,\n  "max_brier_score": 0.1\n}');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function submit(event: FormEvent) { event.preventDefault(); setBusy(true); setError(""); try { const created = await api.createExperiment(datasetId, parseJsonObject(config, "Experiment configuration")); add(created); } catch (reason) { setError(apiMessage(reason, reason instanceof Error ? reason.message : "The experiment could not be queued.")); } finally { setBusy(false); } }
+  return <div className="research-workspace"><form className="card research-form" onSubmit={submit}><div className="section-heading"><div><p className="eyebrow">Reproducible execution</p><h2>Queue an experiment</h2><p>The suspended Kubernetes evaluator claims one queued experiment when <code>make evaluate-next</code> is run.</p></div></div><label className="field"><span>Frozen dataset</span><select required value={datasetId} onChange={(event) => setDatasetId(event.target.value)}><option value="">Select a dataset</option>{datasets.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label><label className="field"><span>Experiment configuration JSON</span><textarea required rows={7} value={config} onChange={(event) => setConfig(event.target.value)} /></label>{error && <div className="alert alert-danger" role="alert"><WarningCircle aria-hidden />{error}</div>}<button className="button button-primary" disabled={busy || !datasetId}>{busy ? "Queueing…" : "Queue experiment"}</button></form><section className="card research-records"><div className="section-heading"><div><p className="eyebrow">Recorded runs</p><h2>Experiments</h2></div></div>{items.length ? <div className="experiment-list">{items.map((item) => <div key={item.id}><span className={`experiment-icon ${["QUEUED", "RUNNING"].includes(item.state) ? "running" : ""}`}>{["QUEUED", "RUNNING"].includes(item.state) ? <Pulse aria-hidden /> : <Flask aria-hidden />}</span><span><strong className="mono">{item.id}</strong><small>{item.state.replaceAll("_", " ")} · dataset {item.dataset_id} · {formatDate(item.created_at)}</small></span><details><summary>Configuration</summary><pre>{JSON.stringify(item.config, null, 2)}</pre></details></div>)}</div> : <p className="muted-copy">No experiment records were returned.</p>}</section></div>;
+}
+
+function ResearchResults({ items }: { items: Experiment[] }) {
+  const completed = items.filter((item) => item.state === "COMPLETE" && Object.keys(item.result).length);
+  if (!completed.length) return <WorkspaceEmpty title="No completed experiment results" detail="Queue an experiment, run the on-demand Kubernetes evaluator, then refresh this workspace." />;
+  return <div className="result-records">{completed.map((item) => { const selection = item.result.selection && typeof item.result.selection === "object" ? item.result.selection as Record<string, unknown> : {}; const locked = item.result.locked_test && typeof item.result.locked_test === "object" ? item.result.locked_test as Record<string, unknown> : {}; const metrics = locked.metrics && typeof locked.metrics === "object" ? locked.metrics as Record<string, unknown> : {}; const candidates = item.result.candidate_validation_metrics && typeof item.result.candidate_validation_metrics === "object" ? item.result.candidate_validation_metrics as Record<string, unknown> : {}; return <section className="card research-result" key={item.id}><div className="section-heading"><div><p className="eyebrow">Experiment {item.id}</p><h2>{String(selection.selected ?? "No candidate selected")}</h2><p>{String(selection.reason ?? "No selection reason recorded.")}</p></div><span className="badge badge-low">Complete</span></div><div className="metric-grid">{Object.entries(metrics).slice(0, 6).map(([name, value]) => <Metric key={name} label={name.replaceAll("_", " ")} value={formatMetric(value)} detail="Locked test set" icon={Pulse} />)}</div><div className="research-detail-grid"><details open><summary>Candidate baselines</summary><pre>{JSON.stringify(candidates, null, 2)}</pre></details><details><summary>Ablation and robustness</summary><pre>{JSON.stringify({ ablation: item.result.validation_ablation, robustness: locked.robustness, slices: locked.slices }, null, 2)}</pre></details><details><summary>Reproducibility manifest</summary><pre>{JSON.stringify(item.result, null, 2)}</pre></details></div></section>; })}</div>;
+}
+
+function ResearchModelCards({ items }: { items: Experiment[] }) {
+  const candidates = items.filter((item) => item.state === "COMPLETE" && item.result.candidate_artifact);
+  if (!candidates.length) return <WorkspaceEmpty title="No candidate model cards" detail="A model card becomes available only when a completed governed experiment selects a candidate." />;
+  return <div className="model-card-list">{candidates.map((item) => { const artifact = item.result.candidate_artifact as Record<string, unknown>; const selection = item.result.selection as Record<string, unknown>; const dataset = item.result.dataset as Record<string, unknown>; return <article className="card model-card" key={item.id}><div className="section-heading"><div><p className="eyebrow">Research-only candidate</p><h2>{String(artifact.model_version ?? selection.selected)}</h2></div><span className="badge badge-medium">Not approved for production</span></div><dl className="technical-grid"><div><dt>Artifact SHA-256</dt><dd>{String(artifact.sha256 ?? "Not recorded")}</dd></div><div><dt>Dataset SHA-256</dt><dd>{String(dataset.raw_sha256 ?? "Not recorded")}</dd></div><div><dt>Rows / domains</dt><dd>{String(dataset.rows ?? "—")} / {String(dataset.domains ?? "—")}</dd></div><div><dt>Experiment</dt><dd>{item.id}</dd></div></dl><h3>Intended use</h3><p>Offline comparison of URL-only phishing classifiers under the recorded dataset, split, calibration, and selection protocol.</p><h3>Out of scope</h3><p>Direct runtime activation, autonomous blocking, or use outside the documented URL-only feature schema.</p><h3>Known limitations</h3><p>{String(dataset.known_domain_isolation_limitation ?? "See the complete experiment manifest for recorded limitations and slice results.")}</p><details><summary>Complete card evidence</summary><pre>{JSON.stringify(item.result, null, 2)}</pre></details></article>; })}</div>;
+}
+
+function ResearchExports({ items, add, runSensitive }: { items: ResearchExport[]; add: (item: ResearchExport) => void; runSensitive: SensitiveActionRunner }) {
+  const [filters, setFilters] = useState('{\n  "consent_required": true,\n  "adjudicated_only": true,\n  "redacted_only": true\n}');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function submit(event: FormEvent) { event.preventDefault(); setBusy(true); setError(""); try { const parsed = parseJsonObject(filters, "Export filters"); await runSensitive(async () => add(await api.createResearchExport(parsed))); } catch (reason) { setError(apiMessage(reason, reason instanceof Error ? reason.message : "The export could not be queued.")); } finally { setBusy(false); } }
+  return <div className="research-workspace"><form className="card research-form" onSubmit={submit}><div className="section-heading"><div><p className="eyebrow">Governed extraction</p><h2>Request a redacted export</h2><p>Fresh authentication is required. The request never grants access to raw URLs.</p></div></div><label className="field"><span>Filters JSON</span><textarea required rows={7} value={filters} onChange={(event) => setFilters(event.target.value)} /></label>{error && <div className="alert alert-danger" role="alert"><WarningCircle aria-hidden />{error}</div>}<button className="button button-primary" disabled={busy}>{busy ? "Queueing…" : "Request export"}</button></form><section className="card research-records"><div className="section-heading"><div><h2>Governed exports</h2><p>Queued records remain unavailable until the export worker records an artifact.</p></div></div>{items.length ? <div className="governance-list">{items.map((item) => <article className="registry-row" key={item.id}><div><strong className="mono">{item.id}</strong><small>{item.expires_at ? `Expires ${formatDate(item.expires_at)}` : "No expiry recorded"}</small></div><span className="badge badge-neutral">{item.state.replaceAll("_", " ")}</span><small>{item.artifact_uri ? "Artifact recorded" : "No artifact recorded"}</small></article>)}</div> : <p className="muted-copy">No export records were returned.</p>}</section></div>;
+}
+
+function formatMetric(value: unknown) {
+  if (typeof value !== "number") return String(value ?? "—");
+  return value >= 0 && value <= 1 ? value.toFixed(3) : value.toLocaleString();
 }
 
 function NotFoundPage() {
@@ -1269,5 +1628,5 @@ function NotFoundPage() {
 }
 
 export function App() {
-  return <SessionProvider><Shell><Routes><Route path="/" element={<ScanPage />} /><Route path="/scan/:id" element={<ResultPage />} /><Route path="/history" element={<HistoryPage />} /><Route path="/account" element={<ProtectedRoute roles={registeredRoles}><AccountPage /></ProtectedRoute>} /><Route path="/sign-in" element={<SignInPage />} /><Route path="/totp" element={<ProtectedRoute roles={registeredRoles}><TotpPage /></ProtectedRoute>} /><Route path="/feedback/:scanId" element={<FeedbackPage />} /><Route path="/analyst/cases" element={<ProtectedRoute roles={analystRoles}><AnalystCasesPage /></ProtectedRoute>} /><Route path="/analyst/cases/:id" element={<ProtectedRoute roles={analystRoles}><AnalystCasePage /></ProtectedRoute>} /><Route path="/admin" element={<ProtectedRoute roles={administratorRoles}><AdminPage /></ProtectedRoute>} /><Route path="/research" element={<ProtectedRoute roles={researcherRoles}><ResearchPage /></ProtectedRoute>} /><Route path="/reports/:id" element={<ResultPage shared />} /><Route path="*" element={<NotFoundPage />} /></Routes></Shell></SessionProvider>;
+  return <SessionProvider><Shell><Routes><Route path="/" element={<ScanPage />} /><Route path="/how-it-works" element={<HowItWorksPage />} /><Route path="/scan/:id" element={<ResultPage />} /><Route path="/history" element={<HistoryPage />} /><Route path="/privacy" element={<PrivacyPage />} /><Route path="/account" element={<ProtectedRoute roles={registeredRoles}><AccountPage /></ProtectedRoute>} /><Route path="/sign-in" element={<SignInPage />} /><Route path="/totp" element={<ProtectedRoute roles={registeredRoles}><TotpPage /></ProtectedRoute>} /><Route path="/feedback/:scanId" element={<FeedbackPage />} /><Route path="/analyst/cases" element={<ProtectedRoute roles={analystRoles}><AnalystCasesPage /></ProtectedRoute>} /><Route path="/analyst/cases/:id" element={<ProtectedRoute roles={analystRoles}><AnalystCasePage /></ProtectedRoute>} /><Route path="/admin" element={<ProtectedRoute roles={administratorRoles}><AdminPage /></ProtectedRoute>} /><Route path="/research" element={<ProtectedRoute roles={researcherRoles}><ResearchPage /></ProtectedRoute>} /><Route path="/reports/:id" element={<ResultPage shared />} /><Route path="*" element={<NotFoundPage />} /></Routes></Shell></SessionProvider>;
 }

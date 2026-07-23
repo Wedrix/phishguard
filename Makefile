@@ -4,10 +4,10 @@ TAG ?= dev
 KUSTOMIZE_OVERLAY ?= demo
 
 .DEFAULT_GOAL := help
-.PHONY: help dev down test build load-latency load-throughput bootstrap deploy terraform-check kustomize-check
+.PHONY: help dev down test build load-latency load-throughput bootstrap deploy evaluate-next terraform-check kustomize-check
 
 help:
-	@printf '%s\n' 'make dev | down | test | build | load-latency | load-throughput | bootstrap PROJECT_ID=... | deploy PROJECT_ID=... DOMAIN=...'
+	@printf '%s\n' 'make dev | down | test | build | load-latency | load-throughput | bootstrap PROJECT_ID=... | deploy PROJECT_ID=... DOMAIN=... | evaluate-next'
 
 dev:
 	docker compose up --build
@@ -37,6 +37,9 @@ bootstrap:
 deploy:
 	@test -n "$(PROJECT_ID)" -a -n "$(DOMAIN)" || (echo 'PROJECT_ID and DOMAIN are required' >&2; exit 2)
 	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) DOMAIN=$(DOMAIN) DNS_ZONE=$(DNS_ZONE) TAG=$(TAG) KUSTOMIZE_OVERLAY=$(KUSTOMIZE_OVERLAY) ./deploy/scripts/deploy.sh
+
+evaluate-next:
+	kubectl -n phishguard-demo create job --from=cronjob/evaluate evaluate-$$(date -u +%Y%m%d%H%M%S)
 
 terraform-check:
 	terraform -chdir=infra/terraform fmt -check -recursive

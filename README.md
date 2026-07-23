@@ -56,9 +56,9 @@ The Terraform and Kubernetes definitions have been validated/rendered locally, b
 
 ## Current scope and acceptance gaps
 
-The implemented vertical slices cover local-only analysis, consented queued enrichment, the isolated fetcher, evidence fusion, session/RBAC foundations, governed review/admin records, and reproducible offline evaluation. Known boundaries are explicit:
+The implemented vertical slices cover local-only analysis, consented queued enrichment, the isolated fetcher, evidence fusion, session/RBAC foundations, governed review/admin records, and reproducible offline evaluation. The responsive client follows the device colour preference, exposes dedicated How it works and Privacy routes, and includes an install manifest and application icons without caching sensitive scan data offline. Known boundaries are explicit:
 
-- research experiment/export requests can be recorded, but no executor currently runs them or publishes artefacts;
+- research experiments and privacy-filtered exports are processed by the suspended, operator-triggered evaluation job and published to governed object storage; this remains an experimental batch workflow rather than an interactive notebook service;
 - account export, retention preferences, and scan-data deletion govern PhishGuard records only; deleting scan data revokes application sessions but does not delete the delegated Google Identity Platform identity;
 - no versioned load report, manual accessibility report, user-study result, live Web Risk smoke result, or backup-restore evidence has been produced;
 - the first deploy remains `RULE_ONLY` until a governed dataset and model-policy pair complete their human approval fields.

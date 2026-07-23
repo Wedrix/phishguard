@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import logging
 import os
+import json
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,7 +22,16 @@ from phishguard.domain.types import Role
 from phishguard.evaluation.train import evaluate_dataset
 from phishguard.infrastructure.database import make_engine, make_session_factory
 from phishguard.infrastructure.encryption import configured_cipher
-from phishguard.infrastructure.models import AuditEvent, UserAccount
+from phishguard.infrastructure.models import (
+    AuditEvent,
+    DatasetSnapshot,
+    Decision,
+    Experiment,
+    Feedback,
+    ResearchExport,
+    Scan,
+    UserAccount,
+)
 from phishguard.jobs.worker import cleanup_expired, run_worker
 from phishguard.logging_config import configure_logging
 
@@ -57,6 +68,14 @@ def main() -> None:
         default=os.environ.get("EVALUATION_MAX_BRIER"),
         help="governed maximum Brier score in [0, 1]",
     )
+    recorded_evaluation = subcommands.add_parser("evaluate-record")
+    recorded_evaluation.add_argument("--experiment-id")
+    recorded_evaluation.add_argument("--next", action="store_true")
+    recorded_evaluation.add_argument("--artifact-root", type=Path, default=Path("/artifacts/research"))
+    recorded_export = subcommands.add_parser("export-record")
+    recorded_export.add_argument("--export-id")
+    recorded_export.add_argument("--next", action="store_true")
+    recorded_export.add_argument("--artifact-root", type=Path, default=Path("/artifacts/research"))
     args = parser.parse_args()
     settings = Settings()
     configure_logging(settings.log_level)
@@ -207,6 +226,10 @@ def main() -> None:
             logger.info("audit chain daily anchor", extra={"status": "empty"})
     elif args.command == "jobs":
         asyncio.run(run_worker(settings, factory, cipher, model, once=args.once))
+    elif args.command == "evaluate-record":
+        _evaluate_recorded_experiment(factory, args.experiment_id, args.next, args.artifact_root)
+    elif args.command == "export-record":
+        _export_recorded_research(factory, args.export_id, args.next, args.artifact_root)
 
 
 def _alembic_config_path() -> Path:
@@ -220,6 +243,166 @@ def _alembic_config_path() -> Path:
         if candidate and candidate.is_file():
             return candidate
     raise SystemExit("alembic.ini was not found; set ALEMBIC_CONFIG to its absolute path")
+
+
+def _evaluate_recorded_experiment(factory, experiment_id: str | None, next_queued: bool, artifact_root: Path) -> None:
+    if bool(experiment_id) == bool(next_queued):
+        raise SystemExit("provide exactly one of --experiment-id or --next")
+    with factory.begin() as db:
+        statement = select(Experiment).where(Experiment.state == "QUEUED").order_by(Experiment.created_at)
+        if experiment_id:
+            statement = statement.where(Experiment.id == experiment_id)
+        experiment = db.scalar(statement.with_for_update(skip_locked=True))
+        if not experiment:
+            if next_queued:
+                print("no queued experiment")
+                return
+            raise SystemExit("queued experiment was not found")
+        dataset = db.get(DatasetSnapshot, experiment.dataset_id)
+        if not dataset:
+            raise SystemExit("experiment dataset was not found")
+        relative_path = dataset.manifest.get("artifact_path")
+        if not isinstance(relative_path, str) or not relative_path:
+            raise SystemExit("dataset manifest requires artifact_path")
+        candidate = (artifact_root / relative_path).resolve()
+        root = artifact_root.resolve()
+        if candidate != root and root not in candidate.parents:
+            raise SystemExit("dataset artifact_path leaves the governed artifact root")
+        if not candidate.is_file():
+            raise SystemExit("dataset artifact is unavailable")
+        if _file_sha256(candidate) != dataset.sha256:
+            raise SystemExit("dataset artifact checksum does not match its frozen snapshot")
+        experiment.state = "RUNNING"
+        run_id = experiment.id
+        config = dict(experiment.config)
+    output = artifact_root / "outputs" / run_id
+    try:
+        manifest = evaluate_dataset(
+            candidate,
+            output,
+            max_expected_calibration_error=_optional_gate(config, "max_expected_calibration_error"),
+            max_brier_score=_optional_gate(config, "max_brier_score"),
+        )
+    except Exception as exc:
+        with factory.begin() as db:
+            failed = db.get(Experiment, run_id)
+            if failed:
+                failed.state = "FAILED"
+                failed.result = {"error_code": type(exc).__name__}
+        raise
+    with factory.begin() as db:
+        completed = db.get(Experiment, run_id)
+        if not completed:
+            raise SystemExit("experiment disappeared before completion")
+        completed.state = "COMPLETE"
+        completed.result = {**manifest, "output_path": f"outputs/{run_id}"}
+    print(f"completed experiment {run_id}")
+
+
+def _optional_gate(config: dict[str, object], name: str) -> float | None:
+    value = config.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not 0 <= float(value) <= 1:
+        raise SystemExit(f"{name} must be in [0, 1]")
+    return float(value)
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _export_recorded_research(factory, export_id: str | None, next_queued: bool, artifact_root: Path) -> None:
+    if bool(export_id) == bool(next_queued):
+        raise SystemExit("provide exactly one of --export-id or --next")
+    with factory.begin() as db:
+        statement = select(ResearchExport).where(ResearchExport.state == "QUEUED").order_by(ResearchExport.created_at)
+        if export_id:
+            statement = statement.where(ResearchExport.id == export_id)
+        export = db.scalar(statement.with_for_update(skip_locked=True))
+        if not export:
+            if next_queued:
+                print("no queued research export")
+                return
+            raise SystemExit("queued research export was not found")
+        export.state = "RUNNING"
+        record_id = export.id
+        requested_filters = dict(export.filters)
+    try:
+        with factory() as db:
+            feedback_rows = list(
+                db.scalars(
+                    select(Feedback).where(
+                        Feedback.research_consent.is_(True),
+                        Feedback.status.like("REVIEWED_%"),
+                    )
+                )
+            )
+            rows: list[dict[str, object]] = []
+            for feedback in feedback_rows:
+                scan = db.get(Scan, feedback.scan_id)
+                if not scan or scan.deleted_at:
+                    continue
+                decision = db.scalar(
+                    select(Decision)
+                    .where(Decision.run_id == scan.run_id)
+                    .order_by(Decision.created_at.desc())
+                )
+                if not decision:
+                    continue
+                rows.append(
+                    {
+                        "record_id": hashlib.sha256(f"{record_id}:{scan.id}".encode()).hexdigest(),
+                        "redacted_url": scan.display_url,
+                        "adjudicated_label": feedback.status.removeprefix("REVIEWED_"),
+                        "original_risk_band": decision.risk_band,
+                        "analysis_scope": decision.analysis_scope,
+                        "completion": decision.completion,
+                        "engine_mode": decision.engine_mode,
+                        "policy_version": decision.policy_version,
+                        "ruleset_version": decision.ruleset_version,
+                        "model_version": decision.model_version,
+                        "research_consent": True,
+                    }
+                )
+        output_dir = artifact_root / "exports"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output = output_dir / f"{record_id}.json"
+        payload = {
+            "schema_version": "phishguard-governed-export/1",
+            "generated_at": datetime.now(UTC).isoformat(),
+            "privacy_controls": {
+                "redacted_only": True,
+                "consent_required": True,
+                "independent_adjudication_required": True,
+                "comments_excluded": True,
+                "identity_fields_excluded": True,
+            },
+            "requested_filters": requested_filters,
+            "row_count": len(rows),
+            "rows": rows,
+        }
+        temporary = output.with_suffix(".tmp")
+        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temporary.replace(output)
+    except Exception:
+        with factory.begin() as db:
+            failed = db.get(ResearchExport, record_id)
+            if failed:
+                failed.state = "FAILED"
+                failed.artifact_uri = None
+        raise
+    with factory.begin() as db:
+        completed = db.get(ResearchExport, record_id)
+        if not completed:
+            raise SystemExit("research export disappeared before completion")
+        completed.state = "COMPLETE"
+        completed.artifact_uri = f"research/exports/{record_id}.json"
+    print(f"completed research export {record_id}")
 
 
 def _canonical_admin_lock(db) -> None:

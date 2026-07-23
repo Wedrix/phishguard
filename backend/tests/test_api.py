@@ -226,7 +226,8 @@ def test_shared_enriched_report_keeps_pinned_evidence_but_not_original_url(clien
     assert shared.status_code == 201
     report = client.get(f"/api/v1/reports/{shared.json()['report_id']}").json()["scan"]
     assert report["decision"]["evidence"][0]["family"] == "REPUTATION"
-    assert report["decision"]["evidence"][0]["value"] == "Detailed evidence is hidden in this shared report."
+    assert report["decision"]["evidence"][0]["value"] is None
+    assert report["decision"]["evidence"][0]["value_redacted"] is True
     assert "secret" not in str(report)
 
 
