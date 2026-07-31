@@ -19,12 +19,12 @@ umask 077
 
 ensure_database_migrator() {
   migrator_user=phishguard_migrator
-  if test -z "$(gcloud sql users list --instance phishguard-demo --project "$PROJECT_ID" --filter="name=${migrator_user}" --limit=1 --format='value(name)')"; then
+  if test -z "$(gcloud sql users list --instance "$database_instance_name" --project "$PROJECT_ID" --filter="name=${migrator_user}" --limit=1 --format='value(name)')"; then
     password_file="$tmp_dir/db-migrator-password"
     flags_file="$tmp_dir/db-migrator-user-flags.yaml"
     gcloud secrets versions access latest --secret phishguard-db-migrator-password --project "$PROJECT_ID" >"$password_file"
     {
-      printf '%s\n' '--instance: phishguard-demo'
+      printf '%s\n' "--instance: ${database_instance_name}"
       printf '%s' '--password: '
       tr -d '\r\n' <"$password_file"
       printf '\n%s\n' '--type: BUILT_IN'
@@ -68,6 +68,8 @@ if test -z "${APP_IMAGE:-}" || test -z "${FETCHER_IMAGE:-}"; then
   firebase_auth_domain=$(terraform -chdir="$TF_DIR" output -raw firebase_auth_domain)
   cloud_build_service_account=$(terraform -chdir="$TF_DIR" output -raw cloud_build_service_account)
   cloud_build_source_bucket=$(terraform -chdir="$TF_DIR" output -raw cloud_build_source_bucket)
+  cloud_sql_connection_name=$(terraform -chdir="$TF_DIR" output -raw cloud_sql_connection_name)
+  database_instance_name=${cloud_sql_connection_name##*:}
 
   ensure_database_migrator
 
@@ -83,7 +85,7 @@ if test -z "${APP_IMAGE:-}" || test -z "${FETCHER_IMAGE:-}"; then
     --config "$ROOT_DIR/cloudbuild.yaml" \
     --service-account="projects/${PROJECT_ID}/serviceAccounts/${cloud_build_service_account}" \
     --gcs-source-staging-dir="gs://${cloud_build_source_bucket}/source" \
-    --substitutions="_REGION=${REGION},_DOMAIN=${DOMAIN},_DEPLOY=true,_TAG=${TAG},_OVERLAY=${KUSTOMIZE_OVERLAY},_FIREBASE_API_KEY=${firebase_api_key},_FIREBASE_AUTH_DOMAIN=${firebase_auth_domain},_FIREBASE_PROJECT_ID=${PROJECT_ID}"
+    --substitutions="_REGION=${REGION},_DOMAIN=${DOMAIN},_DEPLOY=true,_TAG=${TAG},_OVERLAY=${KUSTOMIZE_OVERLAY},_FIREBASE_API_KEY=${firebase_api_key},_FIREBASE_AUTH_DOMAIN=${firebase_auth_domain},_FIREBASE_PROJECT_ID=${PROJECT_ID},_CLOUD_SQL_INSTANCE=${database_instance_name}"
   exit 0
 fi
 
@@ -158,6 +160,6 @@ test "$certificate_state" = ACTIVE || {
 }
 
 kubectl -n phishguard-demo wait --for=condition=Programmed gateway/web --timeout=15m
-curl --fail --silent --show-error --retry 12 --retry-delay 10 "https://${DOMAIN}/healthz" >/dev/null
+curl --fail --silent --show-error --retry-all-errors --retry 60 --retry-delay 10 "https://${DOMAIN}/healthz" >/dev/null
 
 echo "Deployed ${APP_IMAGE} and ${FETCHER_IMAGE} to https://${DOMAIN}"

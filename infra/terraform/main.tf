@@ -1,5 +1,7 @@
 locals {
-  name = "phishguard-demo"
+  name                   = "phishguard-demo"
+  network_name           = "${local.name}-v2"
+  database_instance_name = "${local.name}-v2"
   apis = toset([
     "artifactregistry.googleapis.com",
     "apikeys.googleapis.com",
@@ -83,13 +85,13 @@ resource "google_identity_platform_config" "default" {
 }
 
 resource "google_compute_network" "main" {
-  name                    = local.name
+  name                    = local.network_name
   auto_create_subnetworks = false
   depends_on              = [google_project_service.required]
 }
 
 resource "google_compute_subnetwork" "main" {
-  name                     = local.name
+  name                     = local.network_name
   region                   = var.region
   network                  = google_compute_network.main.id
   ip_cidr_range            = var.network_cidr
@@ -139,7 +141,7 @@ resource "google_compute_router_nat" "main" {
 }
 
 resource "google_compute_global_address" "private_services" {
-  name          = "${local.name}-services"
+  name          = "${local.network_name}-services"
   purpose       = "VPC_PEERING"
   address_type  = "INTERNAL"
   prefix_length = var.service_peering_prefix_length
@@ -247,7 +249,7 @@ data "google_secret_manager_secret" "runtime" {
 }
 
 resource "google_sql_database_instance" "main" {
-  name                = local.name
+  name                = local.database_instance_name
   region              = var.region
   database_version    = "POSTGRES_16"
   deletion_protection = true

@@ -7,6 +7,7 @@ substitutions:
   _FIREBASE_API_KEY: replace-with-restricted-web-key
   _FIREBASE_AUTH_DOMAIN: phishguard.example.firebaseapp.com
   _FIREBASE_PROJECT_ID: phishguard-example
+  _CLOUD_SQL_INSTANCE: phishguard-demo
 
 serviceAccount: projects/${PROJECT_ID}/serviceAccounts/phishguard-cloud-build@${PROJECT_ID}.iam.gserviceaccount.com
 
@@ -71,7 +72,7 @@ steps:
       - -ec
       - |
         if [[ "${_DEPLOY}" != "true" ]]; then exit 0; fi
-        connection_name=$(gcloud sql instances describe phishguard-demo --project "${PROJECT_ID}" --format='value(connectionName)')
+        connection_name=$(gcloud sql instances describe "${_CLOUD_SQL_INSTANCE}" --project "${PROJECT_ID}" --format='value(connectionName)')
         app_digest=$(gcloud artifacts docker images describe "${_REGION}-docker.pkg.dev/${PROJECT_ID}/phishguard/app:${_TAG}" --format='value(image_summary.digest)')
         fetcher_digest=$(gcloud artifacts docker images describe "${_REGION}-docker.pkg.dev/${PROJECT_ID}/phishguard/fetcher:${_TAG}" --format='value(image_summary.digest)')
         PROJECT_ID="${PROJECT_ID}" \
