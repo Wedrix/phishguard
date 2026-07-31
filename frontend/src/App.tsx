@@ -1083,6 +1083,8 @@ function SignInPage() {
 
 function TotpPage() {
   const configured = identityConfigured();
+  const navigate = useNavigate();
+  const session = useSession();
   const [secret, setSecret] = useState("");
   const [qrCodeUrl, setQrCodeUrl] = useState("");
   const [code, setCode] = useState("");
@@ -1120,6 +1122,19 @@ function TotpPage() {
     }
   }
 
+  async function restartSignIn() {
+    setBusy(true);
+    setError("");
+    try {
+      await session.signOut();
+      navigate("/sign-in", { replace: true });
+    } catch {
+      setError("Sign out could not be completed. Try again before requesting a privileged role.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="page narrow-page">
       <PageHeader eyebrow="Account security" title="Set up two-step verification" description="Privileged roles require a time-based one-time password in addition to your password." />
@@ -1127,7 +1142,7 @@ function TotpPage() {
         <ol className="setup-steps"><li className="done"><span><Check aria-hidden /></span>Install an authenticator app</li><li className="active"><span>2</span>Add your PhishGuard account</li><li><span>3</span>Verify a code</li></ol>
         <div className="setup-content">
           <div className="key-panel"><Key aria-hidden /><p>{secret ? "Scan this QR code with your authenticator app, or enter the setup key manually:" : "Generate a fresh setup key after signing in and verifying your email address."}</p>{qrCodeUrl && <div className="totp-qr" role="img" aria-label="Scan this QR code with your authenticator app"><QRCodeSVG value={qrCodeUrl} size={192} level="M" title="PhishGuard authenticator setup QR code" /></div>}{secret && <code>{secret.match(/.{1,4}/g)?.join(" ")}</code>}<button type="button" className="button button-secondary" disabled={busy || !configured} onClick={secret ? () => navigator.clipboard?.writeText(secret) : generateSecret}>{secret ? <><Copy aria-hidden /> Copy key</> : <><Key aria-hidden /> Generate setup key</>}</button></div>
-          <form onSubmit={verify}><label className="field"><span>6-digit verification code</span><input className="code-input" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} autoComplete="one-time-code" required placeholder="000000" value={code} disabled={!secret || verified} onChange={(event) => setCode(event.target.value.replace(/\D/g, ""))} /></label><button className="button button-primary button-large" disabled={!secret || busy || verified}>{busy ? "Please wait…" : "Verify and enable"}</button>{!configured && <div className="alert alert-warning" role="status"><Info aria-hidden />Identity Platform is not configured for this build.</div>}{error && <div className="alert alert-danger" role="alert"><WarningCircle aria-hidden />{error}</div>}{verified && <div className="alert alert-success" role="status"><CheckCircle aria-hidden />Two-step verification is enabled.</div>}</form>
+          <form onSubmit={verify}><label className="field"><span>6-digit verification code</span><input className="code-input" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} autoComplete="one-time-code" required placeholder="000000" value={code} disabled={!secret || verified} onChange={(event) => setCode(event.target.value.replace(/\D/g, ""))} /></label><button className="button button-primary button-large" disabled={!secret || busy || verified}>{busy ? "Please wait…" : "Verify and enable"}</button>{!configured && <div className="alert alert-warning" role="status"><Info aria-hidden />Identity Platform is not configured for this build.</div>}{error && <div className="alert alert-danger" role="alert"><WarningCircle aria-hidden />{error}</div>}{verified && <div className="alert alert-success" role="status"><CheckCircle aria-hidden /><span>Two-step verification is enabled. Sign out and sign back in with your authenticator code before requesting or receiving a privileged role.</span><button className="button button-secondary" type="button" disabled={busy} onClick={restartSignIn}>Sign out and continue</button></div>}</form>
         </div>
       </div>
     </div>

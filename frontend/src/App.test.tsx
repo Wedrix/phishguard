@@ -72,6 +72,25 @@ describe("PhishGuard scan journey", () => {
     expect(screen.getByText("ABCD EFGH IJKL MNOP")).toBeVisible();
   });
 
+  it("requires a fresh MFA sign-in after TOTP enrollment", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, "me").mockResolvedValue({ authenticated: true, session_kind: "USER", user_id: "user-1", role: "REGISTERED_USER" });
+    vi.spyOn(identity, "identityConfigured").mockReturnValue(true);
+    vi.spyOn(identity, "beginTotpEnrollment").mockResolvedValue({ secretKey: "ABCDEFGHIJKLMNOP", qrCodeUrl: "otpauth://totp/PhishGuard:test?secret=ABCDEFGHIJKLMNOP" });
+    vi.spyOn(identity, "completeTotpEnrollment").mockResolvedValue();
+    const signOut = vi.spyOn(identity, "signOutIdentity").mockResolvedValue();
+    renderRoute("/totp");
+
+    await user.click(await screen.findByRole("button", { name: /generate setup key/i }));
+    await user.type(screen.getByLabelText(/6-digit verification code/i), "123456");
+    await user.click(screen.getByRole("button", { name: /verify and enable/i }));
+
+    expect(await screen.findByText(/sign out and sign back in with your authenticator code/i)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: /sign out and continue/i }));
+    expect(signOut).toHaveBeenCalledOnce();
+    expect(await screen.findByRole("heading", { name: /sign in to phishguard/i })).toBeVisible();
+  });
+
   it("defaults to local-only and gates enrichment behind explicit consent", async () => {
     const user = userEvent.setup();
     renderRoute();
